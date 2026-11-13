@@ -516,32 +516,29 @@ export const CSENewsTab: React.FC<CSENewsTabProps> = ({
 
                   {/* Right: Price, Dividend, XD Date, Payment Date & Delete */}
                   <div className="flex flex-wrap items-center gap-3 shrink-0">
-                    {/* Share Price */}
-                    {/* Share Price + Verified Source Badge */}
-                    <div className="text-right bg-slate-50 px-3 py-1.5 rounded-xl border border-slate-200">
-                      <div className="flex items-center justify-end space-x-1.5 mb-0.5">
-                        <span className="text-3xs text-slate-400">Share Price</span>
-                        {item.priceSource === 'CSE_LIVE' && (
-                          <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-emerald-100 text-emerald-800 border border-emerald-200">
-                            ● CSE Live
-                          </span>
-                        )}
-                        {item.priceSource === 'PORTFOLIO' && (
-                          <span className="text-[9px] font-semibold px-1.5 py-0.2 rounded bg-sky-100 text-sky-800 border border-sky-200">
-                            Portfolio
-                          </span>
-                        )}
-                        {item.priceSource === 'MANUAL' && (
-                          <span className="text-[9px] font-semibold px-1.5 py-0.2 rounded bg-amber-100 text-amber-800 border border-amber-200">
-                            Manual Entry
-                          </span>
-                        )}
-                      </div>
-                      <span className="font-bold text-slate-900 tabular-nums">
+                    
+                    {/* Share Price + Verified Source Badge (Stacked Vertically) */}
+                    <div className="text-right bg-slate-50 px-3 py-1.5 rounded-xl border border-slate-200 flex flex-col items-end">
+                      <span className="text-3xs text-slate-400">Share Price</span>
+                      <span className="font-bold text-slate-900 tabular-nums my-0.5">
                         {item.resolvedPrice !== null ? `Rs. ${item.resolvedPrice.toFixed(2)}` : '—'}
                       </span>
+                      {item.priceSource === 'CSE_LIVE' && (
+                        <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-emerald-100 text-emerald-800 border border-emerald-200">
+                          ● CSE Live
+                        </span>
+                      )}
+                      {item.priceSource === 'PORTFOLIO' && (
+                        <span className="text-[9px] font-semibold px-1.5 py-0.2 rounded bg-sky-100 text-sky-800 border border-sky-200">
+                          Portfolio
+                        </span>
+                      )}
+                      {item.priceSource === 'MANUAL' && (
+                        <span className="text-[9px] font-semibold px-1.5 py-0.2 rounded bg-amber-100 text-amber-800 border border-amber-200">
+                          Manual Entry
+                        </span>
+                      )}
                     </div>
-
                     {/* Dividend & Yield % */}
                     {item.dividendAmount && (
                       <div className="text-right bg-emerald-50/70 px-3 py-1.5 rounded-xl border border-emerald-200">
