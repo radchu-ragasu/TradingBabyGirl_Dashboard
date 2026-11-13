@@ -1,0 +1,6 @@
+{
+  "name": "Colombo CSE Portfolio & Capital Ledger",
+  "description": "Zero-hardcoding Colombo Stock Exchange (CSE) portfolio manager, ATrad Excel importer, Asia Securities contract note parser, Amma's Capital Ledger, and P&L calendar.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
