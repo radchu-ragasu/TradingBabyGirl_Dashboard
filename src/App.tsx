@@ -577,7 +577,7 @@ export default function App() {
         onRestoreState={handleRestoreState}
       />
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-7">
+      <main className="max-w-[1680px] w-full mx-auto px-4 sm:px-6 lg:px-8 pt-7">
         {holdingsWithErrors.length > 0 && activeTab === 'portfolio' && (
           <div className="mb-6 p-4 bg-amber-50/90 border border-amber-200/90 rounded-2xl text-xs text-amber-900 flex items-start space-x-3 shadow-2xs">
             <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
