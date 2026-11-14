@@ -32,16 +32,47 @@ import { AddHoldingModal } from './components/AddHoldingModal';
 import { RealizedProfitWalletModal } from './components/RealizedProfitWalletModal';
 import { AlertTriangle, FileText, Download, X } from 'lucide-react';
 
+
+// Sri Lanka CSE Public & Poya Holidays (YYYY-MM-DD) — Add any special CSE closures here
+const CSE_HOLIDAYS = new Set<string>([
+  // 2026 Sri Lanka Poya & Public Holidays
+  '2026-01-03', '2026-01-14', '2026-02-01', '2026-02-04', '2026-03-02',
+  '2026-04-01', '2026-04-03', '2026-04-13', '2026-04-14', '2026-05-01',
+  '2026-05-30', '2026-06-29', '2026-07-29', '2026-08-27', '2026-09-26',
+  '2026-10-25', '2026-11-24', '2026-12-23', '2026-12-25',
+  // 2027 Sri Lanka Poya & Public Holidays
+  '2027-01-14', '2027-01-22', '2027-02-04', '2027-02-20', '2027-03-22',
+  '2027-04-13', '2027-04-14', '2027-04-20', '2027-05-01', '2027-05-20',
+]);
+
+function isCseTradingDay(dateStr: string): boolean {
+  const cleanDate = dateStr.slice(0, 10);
+  if (CSE_HOLIDAYS.has(cleanDate)) return false;
+
+  const [year, month, day] = cleanDate.split('-').map(Number);
+  if (!year || !month || !day) return false;
+
+  // Use UTC day-of-week so timezone shifts never misclassify Friday/Monday
+  const dayOfWeek = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+  // 0 = Sunday, 6 = Saturday
+  return dayOfWeek !== 0 && dayOfWeek !== 6;
+}
+
 function calculateTechnicalsFromHistory(history: PriceHistoryPoint[]): {
   rsi14: number | null;
   sma50: number | null;
+  tradingHistory: PriceHistoryPoint[];
 } {
   if (!Array.isArray(history) || history.length === 0) {
-    return { rsi14: null, sma50: null };
+    return { rsi14: null, sma50: null, tradingHistory: [] };
   }
 
-  const sorted = [...history].sort((a, b) => a.date.localeCompare(b.date));
-  const prices = sorted.map((p) => p.price).filter((p) => typeof p === 'number' && p > 0);
+  // Strictly filter out Saturdays, Sundays, and Poya/CSE holidays
+  const tradingHistory = [...history]
+    .filter((p) => typeof p.price === 'number' && p.price > 0 && isCseTradingDay(p.date))
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  const prices = tradingHistory.map((p) => p.price);
 
   let rsi14: number | null = null;
   if (prices.length >= 15) {
@@ -78,26 +109,33 @@ function calculateTechnicalsFromHistory(history: PriceHistoryPoint[]): {
     sma50 = sum / 50;
   }
 
-  return { rsi14, sma50 };
+  return { rsi14, sma50, tradingHistory };
 }
 
 function recordPriceAndComputeTechnicals(
   holding: Holding,
   existingHistory?: PriceHistoryPoint[]
 ): Holding {
-  const baseHistory = Array.isArray(existingHistory)
-    ? [...existingHistory]
-    : Array.isArray(holding.priceHistory)
-    ? [...holding.priceHistory]
-    : [];
+  // Clean out any previously saved weekend/holiday entries immediately
+  const baseHistory = (
+    Array.isArray(existingHistory)
+      ? existingHistory
+      : Array.isArray(holding.priceHistory)
+      ? holding.priceHistory
+      : []
+  ).filter((p) => isCseTradingDay(p.date));
 
   if (holding.marketPrice !== null && holding.marketPrice > 0) {
     const dateKey = (holding.priceAsOf || new Date().toISOString()).slice(0, 10);
-    const idx = baseHistory.findIndex((p) => p.date === dateKey);
-    if (idx !== -1) {
-      baseHistory[idx] = { date: dateKey, price: holding.marketPrice };
-    } else {
-      baseHistory.push({ date: dateKey, price: holding.marketPrice });
+
+    // Only record if today/priceAsOf is an actual CSE trading day (Mon-Fri & non-Poya)
+    if (isCseTradingDay(dateKey)) {
+      const idx = baseHistory.findIndex((p) => p.date === dateKey);
+      if (idx !== -1) {
+        baseHistory[idx] = { date: dateKey, price: holding.marketPrice };
+      } else {
+        baseHistory.push({ date: dateKey, price: holding.marketPrice });
+      }
     }
   }
 
@@ -114,6 +152,7 @@ function recordPriceAndComputeTechnicals(
     sma50: sma50 !== null ? sma50 : holding.sma50 ?? null,
   };
 }
+
 
 export default function App() {
   const [state, setState] = useState<AppState>(() => {
