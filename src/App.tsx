@@ -524,7 +524,75 @@ export default function App() {
   };
 
   const handleSyncNews = async () => {
-    setIsSyncingNews(false);
+    setIsSyncingNews(true);
+    setSyncNewsError(null);
+
+    try {
+      const symbols = state.holdings.map((h) => h.symbol);
+      const res = await fetch('/api/cse/news-dividends', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbols }),
+      });
+
+      const data = await res.json();
+
+      if (!data?.success) {
+        setSyncNewsError(data?.error || 'Could not fetch live announcements from cse.lk right now.');
+        setIsSyncingNews(false);
+        return;
+      }
+
+      const incoming: CSENewsItem[] = Array.isArray(data.announcements) ? data.announcements : [];
+
+      setState((prev) => {
+        // Keep user's manually added entries + merge newly fetched CSE announcements without duplicates
+        const existingKeys = new Set(
+          prev.news.map((n) => `${n.symbol.toUpperCase()}_${(n.xdDate || n.headline).slice(0, 30)}`)
+        );
+
+        const freshItems = incoming.filter((item) => {
+          const key = `${item.symbol.toUpperCase()}_${(item.xdDate || item.headline).slice(0, 30)}`;
+          return !existingKeys.has(key);
+        });
+
+        // Also update XD Date & Dividend badge on owned Portfolio Holdings automatically!
+        const divBySymbol = new Map<string, CSENewsItem>();
+        [...freshItems, ...prev.news].forEach((item) => {
+          if (item.category === 'DIVIDEND') {
+            divBySymbol.set(item.symbol.toUpperCase(), item);
+            divBySymbol.set(item.symbol.toUpperCase().split('.')[0], item);
+          }
+        });
+
+        const updatedHoldings = prev.holdings.map((h) => {
+          const matchedDiv =
+            divBySymbol.get(h.symbol.toUpperCase()) ||
+            divBySymbol.get(h.symbol.toUpperCase().split('.')[0]);
+          if (!matchedDiv) return h;
+
+          return {
+            ...h,
+            dividendInfo: matchedDiv.dividendAmount
+              ? `Rs. ${matchedDiv.dividendAmount.toFixed(2)}/sh`
+              : h.dividendInfo || 'Dividend Declared',
+            xdDate: matchedDiv.xdDate || h.xdDate,
+            paymentDate: matchedDiv.paymentDate || h.paymentDate,
+          };
+        });
+
+        return {
+          ...prev,
+          holdings: updatedHoldings,
+          news: [...freshItems, ...prev.news],
+          lastNewsSync: new Date().toISOString(),
+        };
+      });
+    } catch (err: any) {
+      setSyncNewsError(`Network error syncing CSE dividends: ${err?.message || 'Check server connection'}`);
+    } finally {
+      setIsSyncingNews(false);
+    }
   };
 
   const handleUpdateSettings = (newSettings: AppSettings) => {
