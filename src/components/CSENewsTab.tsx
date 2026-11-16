@@ -46,7 +46,15 @@ const MONTHS = [
   'July', 'August', 'September', 'October', 'November', 'December'
 ];
 
-function is2026OrLater(item: CSENewsItem): boolean {
+function isValidDividendItem(item: CSENewsItem): boolean {
+  // Strictly ensure it is an actual Dividend / XD / Scrip announcement (ignore general corporate notices)
+  const isDividendCategory =
+    item.category === 'DIVIDEND' ||
+    Boolean(item.dividendAmount && item.dividendAmount > 0) ||
+    Boolean(item.xdDate);
+
+  if (!isDividendCategory) return false;
+
   const targetDate = item.xdDate || item.date;
   if (!targetDate) return false;
   const year = parseInt(String(targetDate).slice(0, 4), 10);
@@ -140,7 +148,7 @@ export const CSENewsTab: React.FC<CSENewsTabProps> = ({
   // 1. Archive every 2026+ item into the Permanent Seasonality Book BEFORE removing completed ones
   // 2. Auto-purge pre-2026 clutter AND items whose Payment Date has already passed
   useEffect(() => {
-    const valid2026 = newsItems.filter(is2026OrLater);
+    const valid2026 = newsItems.filter(isValidDividendItem);
 
     if (valid2026.length > 0) {
       setDividendBook((prevBook) => {
@@ -197,7 +205,7 @@ export const CSENewsTab: React.FC<CSENewsTabProps> = ({
 
     if (onDeleteDividendItem) {
       const itemsToRemove = newsItems.filter(
-        (item) => !is2026OrLater(item) || isPaymentCompleted(item)
+        (item) => !isValidDividendItem(item) || isPaymentCompleted(item)
       );
       if (itemsToRemove.length > 0) {
         itemsToRemove.forEach((stale) => onDeleteDividendItem(stale.id));
@@ -207,7 +215,7 @@ export const CSENewsTab: React.FC<CSENewsTabProps> = ({
 
   // Active Radar items: 2026+ AND Payment Date not yet passed
   const activeRadarItems = newsItems.filter(
-    (item) => is2026OrLater(item) && !isPaymentCompleted(item)
+    (item) => isValidDividendItem(item) && !isPaymentCompleted(item)
   );
 
   // Fetch live share prices for active radar items

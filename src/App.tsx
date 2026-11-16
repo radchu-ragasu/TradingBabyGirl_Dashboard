@@ -2,7 +2,7 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
-
+import { loadSavedState, persistState, clearAllData, hydrateFromLocalJsonFile } from './services/storage';
 import React, { useState, useEffect } from 'react';
 import { 
   AppState, 
@@ -15,7 +15,6 @@ import {
   ReceiptDocument,
   PriceHistoryPoint
 } from './types';
-import { loadSavedState, persistState, clearAllData } from './services/storage';
 import { Navbar, NavTab } from './components/Navbar';
 import { SummaryMetrics } from './components/SummaryMetrics';
 import { HoldingsTable } from './components/HoldingsTable';
@@ -112,11 +111,22 @@ function calculateTechnicalsFromHistory(history: PriceHistoryPoint[]): {
   return { rsi14, sma50, tradingHistory };
 }
 
+/**
+ * Get current date in Sri Lanka Timezone (Asia/Colombo -> YYYY-MM-DD)
+ */
+function getSriLankaTodayIso(): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Colombo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+}
+
 function recordPriceAndComputeTechnicals(
   holding: Holding,
   existingHistory?: PriceHistoryPoint[]
 ): Holding {
-  // Clean out any previously saved weekend/holiday entries immediately
   const baseHistory = (
     Array.isArray(existingHistory)
       ? existingHistory
@@ -126,9 +136,12 @@ function recordPriceAndComputeTechnicals(
   ).filter((p) => isCseTradingDay(p.date));
 
   if (holding.marketPrice !== null && holding.marketPrice > 0) {
-    const dateKey = (holding.priceAsOf || new Date().toISOString()).slice(0, 10);
+    // Extract YYYY-MM-DD if priceAsOf is an ISO date, otherwise use exact Sri Lanka Today date
+    const rawAsOf = String(holding.priceAsOf || '').trim();
+    const dateKey = /^\d{4}-\d{2}-\d{2}/.test(rawAsOf)
+      ? rawAsOf.slice(0, 10)
+      : getSriLankaTodayIso();
 
-    // Only record if today/priceAsOf is an actual CSE trading day (Mon-Fri & non-Poya)
     if (isCseTradingDay(dateKey)) {
       const idx = baseHistory.findIndex((p) => p.date === dateKey);
       if (idx !== -1) {
@@ -152,8 +165,6 @@ function recordPriceAndComputeTechnicals(
     sma50: sma50 !== null ? sma50 : holding.sma50 ?? null,
   };
 }
-
-
 export default function App() {
   const [state, setState] = useState<AppState>(() => {
     const loaded = loadSavedState();
@@ -173,6 +184,24 @@ export default function App() {
 
   const [isSyncingNews, setIsSyncingNews] = useState(false);
   const [syncNewsError, setSyncNewsError] = useState<string | null>(null);
+
+
+// Auto-load from PC Hard Disk (data/portfolio-db.json) if browser storage is empty
+  useEffect(() => {
+    hydrateFromLocalJsonFile().then((diskState) => {
+      if (diskState && (diskState.holdings.length > 0 || diskState.ledger.length > 0 || diskState.trades.length > 0)) {
+        setState((prev) => {
+          if (prev.holdings.length === 0 && prev.ledger.length === 0 && prev.trades.length === 0) {
+            return {
+              ...diskState,
+              holdings: diskState.holdings.map((h) => recordPriceAndComputeTechnicals(h)),
+            };
+          }
+          return prev;
+        });
+      }
+    });
+  }, []);
 
   useEffect(() => {
     persistState(state);
