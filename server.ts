@@ -2,6 +2,7 @@ import express from 'express';
 import type { Request, Response } from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
 
@@ -16,8 +17,58 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
+
+// Local JSON File Database Path (Unlimited Storage on PC Hard Disk)
+const DATA_DIR = path.resolve(__dirname, 'data');
+const DB_FILE_PATH = path.join(DATA_DIR, 'portfolio-db.json');
+
+function ensureDbFile() {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(DB_FILE_PATH)) {
+    fs.writeFileSync(DB_FILE_PATH, JSON.stringify({ state: null, dividendBook: [] }, null, 2), 'utf-8');
+  }
+}
+
+/**
+ * Endpoint: Read entire portfolio state & dividend book from local JSON file
+ */
+app.get('/api/storage', (_req: Request, res: Response) => {
+  try {
+    ensureDbFile();
+    const raw = fs.readFileSync(DB_FILE_PATH, 'utf-8');
+    const parsed = JSON.parse(raw || '{}');
+    res.json({ success: true, data: parsed });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to read local JSON DB' });
+  }
+});
+
+/**
+ * Endpoint: Persist portfolio state & dividend book to local JSON file
+ */
+app.post('/api/storage', (req: Request, res: Response) => {
+  try {
+    ensureDbFile();
+    const currentRaw = fs.readFileSync(DB_FILE_PATH, 'utf-8');
+    const currentData = JSON.parse(currentRaw || '{}');
+
+    const updatedData = {
+      ...currentData,
+      ...(req.body.state !== undefined ? { state: req.body.state } : {}),
+      ...(req.body.dividendBook !== undefined ? { dividendBook: req.body.dividendBook } : {}),
+      updatedAt: new Date().toISOString(),
+    };
+
+    fs.writeFileSync(DB_FILE_PATH, JSON.stringify(updatedData, null, 2), 'utf-8');
+    res.json({ success: true, filePath: DB_FILE_PATH });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to write local JSON DB' });
+  }
+});
 
 const CSE_HEADERS = {
   'Content-Type': 'application/x-www-form-urlencoded',
@@ -64,18 +115,6 @@ async function fetchDirectCSECompanyInfo(symbol: string) {
 }
 
 /**
- * Helper: Normalize company name for fuzzy matching (e.g. "SRI LANKA TELECOM PLC" -> "SRI LANKA TELECOM")
- */
-function normalizeCompanyName(name: string): string {
-  return name
-    .toUpperCase()
-    .replace(/\b(PLC|LTD|LIMITED|\(PVT\)|PVT|THE|COMPANY|CO\.?)\b/g, '')
-    .replace(/[^A-Z0-9]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-/**
  * Helper: Convert CSE date string like "25 Nov 2026" to ISO "2026-11-25"
  */
 function parseCseDateToIso(dateInput: any): string | null {
@@ -95,7 +134,7 @@ function parseCseDateToIso(dateInput: any): string | null {
 }
 
 /**
- * Helper: Fetch full announcement details (symbol, votingDivPerShare, xd, payment, PDF) by announcementId
+ * Helper: Fetch full announcement details by announcementId
  */
 async function fetchCSEAnnouncementDetail(announcementId: number | string) {
   try {
@@ -153,13 +192,13 @@ app.post('/api/cse/news-dividends', async (req: Request, res: Response): Promise
     const technicalsMap: Record<string, any> = {};
     const seenKeys = new Set<string>();
 
-    // Filter relevant announcements (all Dividend/XD items + announcements for owned companies)
-    const candidateItems = announcementsRaw.filter((item) => {
-      const cat = String(item.announcementCategory || '').toUpperCase();
-      return /DIVIDEND|XD|SCRIP|BONUS|SUB-DIVISION|RIGHTS/i.test(cat) || Boolean(item.announcementId);
-    }).slice(0, 35);
+    const candidateItems = announcementsRaw
+      .filter((item) => {
+        const cat = String(item.announcementCategory || '').toUpperCase();
+        return /DIVIDEND|XD|SCRIP|BONUS|SUB-DIVISION|RIGHTS/i.test(cat) || Boolean(item.announcementId);
+      })
+      .slice(0, 35);
 
-    // Fetch exact details via getAnnouncementById in parallel (fast!)
     const detailResults = await Promise.allSettled(
       candidateItems.map((item) =>
         item.announcementId ? fetchCSEAnnouncementDetail(item.announcementId) : Promise.resolve(null)
@@ -200,10 +239,8 @@ app.post('/api/cse/news-dividends', async (req: Request, res: Response): Promise
         /DIVIDEND|XD|SCRIP|BONUS/i.test(category) ||
         Boolean(det.xd || det.payment || det.votingDivPerShare || det.divPerShare);
 
-      // Keep ALL updates for owned portfolio stocks + ALL market-wide Dividend declarations!
       if (!isOwned && !isDiv) continue;
 
-      // Extract exact Dividend Per Share (votingDivPerShare, nonVotingDivPerShare, or divPerShare)
       const isNonVoting = finalSym.includes('.X');
       let dividendAmount: number | null = null;
       if (isNonVoting && typeof det.nonVotingDivPerShare === 'number' && det.nonVotingDivPerShare > 0) {
@@ -218,7 +255,9 @@ app.post('/api/cse/news-dividends', async (req: Request, res: Response): Promise
 
       const xdDate = parseCseDateToIso(det.xd || item.xd);
       const paymentDate = parseCseDateToIso(det.payment || det.paymentDate || item.paymentDate);
-      const isoDate = parseCseDateToIso(det.dateOfAnnouncement || item.dateOfAnnouncement) || new Date().toISOString().slice(0, 10);
+      const isoDate =
+        parseCseDateToIso(det.dateOfAnnouncement || item.dateOfAnnouncement) ||
+        new Date().toISOString().slice(0, 10);
 
       const dedupeKey = `${finalSym}_${category}_${xdDate || isoDate}`;
       if (seenKeys.has(dedupeKey)) continue;
@@ -261,7 +300,6 @@ app.post('/api/cse/news-dividends', async (req: Request, res: Response): Promise
       }
     }
 
-    // Fetch live share prices for all discovered Dividend stocks
     const divSymbols = Array.from(
       new Set(allAnnouncements.filter((a) => a.category === 'DIVIDEND').map((a) => a.symbol))
     ).slice(0, 25);
@@ -293,8 +331,9 @@ app.post('/api/cse/news-dividends', async (req: Request, res: Response): Promise
     });
   }
 });
+
 /**
- * 100% Free, Offline-Capable CSE & Asia Securities Contract Note Parser (Zero API Key Needed!)
+ * 100% Free, Offline-Capable CSE & Asia Securities Contract Note Parser
  */
 function extractContractNoteLocally(text: string) {
   const cleanText = text.replace(/\r/g, '\n');
@@ -385,7 +424,7 @@ function extractContractNoteLocally(text: string) {
 }
 
 /**
- * Endpoint to parse Asia Securities or CSE Broker Contract Notes (100% Free Local Engine)
+ * Endpoint to parse Asia Securities or CSE Broker Contract Notes
  */
 app.post('/api/parse-contract-note', async (req: Request, res: Response): Promise<void> => {
   const { fileData, mimeType, rawText } = req.body;
@@ -471,9 +510,9 @@ app.post('/api/cse/quote', async (req: Request, res: Response): Promise<void> =>
   });
 });
 
-
 // Production vs Development server setup
 async function startServer() {
+  ensureDbFile();
   const isProduction = process.env.NODE_ENV === 'production';
 
   if (!isProduction) {
@@ -493,10 +532,10 @@ async function startServer() {
 
   app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Local JSON Storage active at: ${DB_FILE_PATH}`);
   });
 }
 
 startServer().catch((err) => {
   console.error('Failed to start server:', err);
 });
-
