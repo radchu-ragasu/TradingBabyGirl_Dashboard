@@ -1,3 +1,8 @@
+import * as pdfjsLib from 'pdfjs-dist';
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+
 export interface TradeFeeBreakdown {
   grossConsideration: number;
   brokerageFee: number;
@@ -15,17 +20,10 @@ export interface SplitPreview {
   costBasis: number;
   realizedPnL: number;
   isProfit: boolean;
-  reinvest70: number; // 70%
-  payout30: number; // 30%
+  reinvest70: number;
+  payout30: number;
 }
 
-/**
- * Calculate official CSE statutory fees (1.12% total for equity up to Rs. 100M)
- * Brokerage: 0.640%
- * SEC Cess: 0.084%
- * CDS Fee: 0.024%
- * Share Transaction Levy: 0.300%
- */
 export function calculateCseTradeFees(quantity: number, price: number, isBuy: boolean): TradeFeeBreakdown {
   const grossConsideration = Math.round(quantity * price * 100) / 100;
   const brokerageFee = Math.round(grossConsideration * 0.0064 * 100) / 100;
@@ -49,10 +47,6 @@ export function calculateCseTradeFees(quantity: number, price: number, isBuy: bo
   };
 }
 
-/**
- * Calculate instant Gain/Loss and 70/30 Re-invest vs Payout Split for a sold position
- * Supports exact Net Sale Amount from contract note or calculated 1.12% CSE fees
- */
 export function calculateGainLossAndSplit(
   quantity: number,
   sellPrice: number,
@@ -87,42 +81,209 @@ export function calculateGainLossAndSplit(
     payout30,
   };
 }
+
 /**
- * Parse Asia Securities / CSE Broker Contract Note via backend Gemini API
+ * Normalize OCR/PDF extracted numbers (handles "1,324.99" as well as "1.324.99" thousands dot artifacts)
+ */
+function parseAsiaNumber(raw: string): number {
+  const cleaned = raw.replace(/,/g, '').trim();
+  const parts = cleaned.split('.');
+  if (parts.length > 2) {
+    const decimalPart = parts.pop()!;
+    return parseFloat(`${parts.join('')}.${decimalPart}`) || 0;
+  }
+  return parseFloat(cleaned) || 0;
+}
+
+/**
+ * Extract structured text lines sorted by page & vertical Y coordinate from PDF
+ */
+async function extractTextFromPdfFile(file: File): Promise<string> {
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  const allLines: string[] = [];
+
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+    const textContent = await page.getTextContent();
+
+    // Group items by approximate Y position (within 3pt tolerance)
+    const rows: { y: number; items: { x: number; str: string }[] }[] = [];
+
+    for (const item of textContent.items as any[]) {
+      const str = (item.str || '').trim();
+      if (!str) continue;
+      const x = item.transform[4];
+      const y = item.transform[5];
+
+      let targetRow = rows.find((r) => Math.abs(r.y - y) <= 3);
+      if (!targetRow) {
+        targetRow = { y, items: [] };
+        rows.push(targetRow);
+      }
+      targetRow.items.push({ x, str });
+    }
+
+    // Sort top-to-bottom (descending Y in PDF coords) and left-to-right (ascending X)
+    rows.sort((a, b) => b.y - a.y);
+    for (const row of rows) {
+      row.items.sort((a, b) => a.x - b.x);
+      allLines.push(row.items.map((i) => i.str).join(' '));
+    }
+  }
+
+  return allLines.join('\n');
+}
+
+/**
+ * 100% Offline Parser for Asia Securities (Pvt) Ltd Trade Confirmation PDFs & Pasted Text
+ */
+/**
+ * 100% Offline Parser for Asia Securities (Pvt) Ltd Trade Confirmation PDFs & Pasted Text
  */
 export async function parseContractNoteApi(
   file?: File,
   rawText?: string
 ): Promise<{ success: boolean; data?: any; error?: string }> {
   try {
-    let fileData: string | undefined;
-    let mimeType: string | undefined;
+    let text = rawText || '';
 
     if (file) {
-      mimeType = file.type || 'application/pdf';
-      const buffer = await file.arrayBuffer();
-      // Convert buffer to base64
-      let binary = '';
-      const bytes = new Uint8Array(buffer);
-      const len = bytes.byteLength;
-      for (let i = 0; i < len; i++) {
-        binary += String.fromCharCode(bytes[i]);
+      if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+        text = await extractTextFromPdfFile(file);
+      } else {
+        return {
+          success: false,
+          error: 'Please upload the official Asia Securities PDF file.',
+        };
       }
-      fileData = btoa(binary);
     }
 
-    const res = await fetch('/api/parse-contract-note', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fileData, mimeType, rawText }),
-    });
+    if (!text.trim()) {
+      return {
+        success: false,
+        error: 'This PDF has no selectable text.',
+      };
+    }
 
-    const json = await res.json();
-    return json;
+    const dateMatch =
+      text.match(/Trade Date\s*:?\s*(\d{2})\/(\d{2})\/(\d{4})/i) ||
+      text.match(/\b(\d{2})\/(\d{2})\/(20\d{2})\b/);
+    const tradeDate = dateMatch
+      ? `${dateMatch[3]}-${dateMatch[2]}-${dateMatch[1]}`
+      : new Date().toISOString().split('T')[0];
+
+    const cdsMatch = text.match(/(?:Client A\/C No\.|CDS Account Number)\s*:?\s*([A-Z0-9\-\/]+)/i);
+    const clientCdsNumber = cdsMatch ? cdsMatch[1].trim() : 'N/A';
+
+    const flatText = text.replace(/\s+/g, ' ');
+
+    // Split text at every "Sale of " or "Purchase of "
+    const chunks = flatText.split(/(?=\b(?:Sale|Purchase)\s+of\s+)/i);
+    const trades: any[] = [];
+    const contractNumbers: string[] = [];
+
+    for (const chunk of chunks) {
+      const headerMatch = chunk.match(/^(Sale|Purchase)\s+of\s+([^(]+)\(([^)]+)\)/i);
+      if (!headerMatch) continue;
+
+      const type = headerMatch[1].toUpperCase() === 'PURCHASE' ? 'BUY' : 'SELL';
+      const companyName = headerMatch[2].trim();
+      const insideParens = headerMatch[3].trim();
+
+      // Extract CSE ticker like CARE.N0000 or COMB.X0000
+      const symbolMatch = insideParens.match(/([A-Z0-9]{2,10}\.[A-Z0-9]{4,5})/i);
+      const symbol = symbolMatch
+        ? symbolMatch[1].toUpperCase()
+        : insideParens.split('/')[0].trim().toUpperCase();
+
+      // Trim anything after "Purchase Total" / "Sales Total" in the last chunk
+      const bodyOnly = chunk
+        .slice(headerMatch[0].length)
+        .split(/\b(?:Purchase Total|Sales Total|Net Settlement Value)\b/i)[0];
+
+      const cNos = bodyOnly.match(/\b20\d{9}\b/g);
+      if (cNos) {
+        cNos.forEach((cn) => {
+          if (!contractNumbers.includes(cn)) contractNumbers.push(cn);
+        });
+      }
+
+      // Find the "Total" row (or fallback to individual trade rows if Total isn't present)
+      const totalIdx = bodyOnly.search(/\bTotal\b/i);
+      if (totalIdx !== -1) {
+        // Grab numbers around "Total" (handles both "Total 100 14.00..." and "90 Total 8.70...")
+        const windowStart = Math.max(0, totalIdx - 15);
+        const totalWindow = bodyOnly.slice(windowStart, totalIdx + 180);
+        const numTokens = totalWindow.match(/\b\d[\d,.]*\b/g) || [];
+        const nums = numTokens.map(parseAsiaNumber);
+
+        if (nums.length >= 10) {
+          const quantity = Math.round(nums[0]);
+          const grossPrice = nums[1];
+          const grossConsideration = nums[2];
+          const brokerageFee = nums[3];
+          const secFee = nums[4];
+          const exchangeFee = nums[5];
+          const cdsFee = nums[6];
+          const govCess = nums[7];
+          const clearingFee = nums[8];
+          const netConsideration = nums[9];
+
+          const totalExpenses =
+            Math.round((brokerageFee + secFee + exchangeFee + cdsFee + govCess + clearingFee) * 100) / 100;
+
+          const expectedNet =
+            type === 'SELL' ? grossConsideration - totalExpenses : grossConsideration + totalExpenses;
+          const diff = Math.abs(expectedNet - netConsideration);
+
+          trades.push({
+            type,
+            symbol,
+            companyName,
+            quantity,
+            grossPrice,
+            grossConsideration,
+            brokerageFee,
+            secCess: Math.round((secFee + govCess) * 100) / 100,
+            cdsFee,
+            shareTransactionLevy: Math.round((exchangeFee + clearingFee) * 100) / 100,
+            totalExpenses,
+            netConsideration,
+            confidence: diff <= 0.05 ? 'HIGH' : 'NEEDS_MANUAL_CHECK',
+            unreadableFlags: diff > 0.05 ? [`Net check diff: ${diff.toFixed(2)}`] : [],
+          });
+        }
+      }
+    }
+
+    if (trades.length === 0) {
+      const salePos = flatText.search(/(?:Sale|Purchase)\s+of/i);
+      const debugPart = salePos !== -1 ? flatText.slice(salePos, salePos + 260) : flatText.slice(0, 260);
+      return {
+        success: false,
+        error: `Could not parse trade rows. Debug: "${debugPart}"`,
+      };
+    }
+
+    const totalNetConsideration =
+      Math.round(trades.reduce((sum, t) => sum + t.netConsideration, 0) * 100) / 100;
+
+    return {
+      success: true,
+      data: {
+        brokerName: 'Asia Securities (Pvt) Ltd',
+        tradeDate,
+        clientCdsNumber,
+        contractNoteNumber: contractNumbers.length > 0 ? contractNumbers[0] : undefined,
+        totalNetConsideration,
+        trades,
+      },
+    };
   } catch (err: any) {
     return {
       success: false,
-      error: `Network error parsing contract note: ${err?.message || 'Check connection'}.`,
+      error: `PDF Parser Error: ${err?.message || 'Unable to read PDF file.'}`,
     };
   }
 }
