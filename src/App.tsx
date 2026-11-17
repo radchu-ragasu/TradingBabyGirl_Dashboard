@@ -165,7 +165,7 @@ function recordPriceAndComputeTechnicals(
     sma50: sma50 !== null ? sma50 : holding.sma50 ?? null,
   };
 }
-export default function App() {
+  export default function App() {
   const [state, setState] = useState<AppState>(() => {
     const loaded = loadSavedState();
     return {
@@ -186,7 +186,7 @@ export default function App() {
   const [syncNewsError, setSyncNewsError] = useState<string | null>(null);
 
 
-// Auto-load from PC Hard Disk (data/portfolio-db.json) if browser storage is empty
+  // Auto-load from PC Hard Disk (data/portfolio-db.json) if browser storage is empty
   useEffect(() => {
     hydrateFromLocalJsonFile().then((diskState) => {
       if (diskState && (diskState.holdings.length > 0 || diskState.ledger.length > 0 || diskState.trades.length > 0)) {

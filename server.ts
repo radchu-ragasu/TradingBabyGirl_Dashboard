@@ -115,6 +115,161 @@ async function fetchDirectCSECompanyInfo(symbol: string) {
 }
 
 /**
+ * Helper: Calculate 14-Day RSI & 50-Day SMA from historical closing prices
+ */
+function calculateIndicatorsFromCloses(closes: number[]) {
+  if (!Array.isArray(closes) || closes.length === 0) {
+    return { rsi14: null, sma50: null, daysCount: 0 };
+  }
+
+  let rsi14: number | null = null;
+  if (closes.length >= 15) {
+    let gains = 0;
+    let losses = 0;
+    for (let i = 1; i <= 14; i++) {
+      const diff = closes[i] - closes[i - 1];
+      if (diff >= 0) gains += diff;
+      else losses += Math.abs(diff);
+    }
+    let avgGain = gains / 14;
+    let avgLoss = losses / 14;
+
+    for (let i = 15; i < closes.length; i++) {
+      const diff = closes[i] - closes[i - 1];
+      const gain = diff > 0 ? diff : 0;
+      const loss = diff < 0 ? Math.abs(diff) : 0;
+      avgGain = (avgGain * 13 + gain) / 14;
+      avgLoss = (avgLoss * 13 + loss) / 14;
+    }
+
+    if (avgLoss === 0) {
+      rsi14 = avgGain === 0 ? 50 : 100;
+    } else {
+      const rs = avgGain / avgLoss;
+      rsi14 = Math.round((100 - 100 / (1 + rs)) * 10) / 10;
+    }
+  }
+
+  let sma50: number | null = null;
+  if (closes.length >= 50) {
+    const last50 = closes.slice(-50);
+    sma50 = Math.round((last50.reduce((a, b) => a + b, 0) / 50) * 100) / 100;
+  }
+
+  return { rsi14, sma50, daysCount: closes.length };
+}
+
+/**
+ * Endpoint: Fetch Live CSE Price + Historical 1-Year Daily Chart Data to compute exact RSI(14) & SMA(50)
+ */
+app.post('/api/cse/technicals', async (req: Request, res: Response): Promise<void> => {
+  const { symbol } = req.body;
+  if (!symbol || typeof symbol !== 'string') {
+    res.status(400).json({ success: false, error: 'Stock symbol is required' });
+    return;
+  }
+
+  const cleanSymbol = symbol.trim().toUpperCase();
+
+  try {
+    // 1. Get companyInfoSummery (includes stockId & current price)
+    const infoRes = await fetch('https://www.cse.lk/api/companyInfoSummery', {
+      method: 'POST',
+      headers: CSE_HEADERS,
+      body: new URLSearchParams({ symbol: cleanSymbol }).toString(),
+    });
+
+    if (!infoRes.ok) {
+      res.json({ success: false, symbol: cleanSymbol, rsi14: null, sma50: null });
+      return;
+    }
+
+    const infoData: any = await infoRes.json();
+    const symInfo = infoData?.reqSymbolInfo;
+    const stockId = symInfo?.id;
+
+    const latestPrice =
+      typeof symInfo?.lastTradedPrice === 'number' && symInfo.lastTradedPrice > 0
+        ? symInfo.lastTradedPrice
+        : typeof symInfo?.closingPrice === 'number' && symInfo.closingPrice > 0
+        ? symInfo.closingPrice
+        : null;
+
+    let closes: number[] = [];
+
+    // 2. Fetch historical daily chart points from CSE using stockId
+    if (stockId) {
+      const chartRes = await fetch('https://www.cse.lk/api/companyChartDataByStock', {
+        method: 'POST',
+        headers: CSE_HEADERS,
+        body: new URLSearchParams({
+          stockId: String(stockId),
+          period: '5', // 5 = 1 Year (~240 trading days -> exact TradingView RSI-14 & SMA-50)
+        }).toString(),
+      });
+
+      if (chartRes.ok) {
+        const chartJson: any = await chartRes.json();
+        const rawPoints: any[] = Array.isArray(chartJson?.chartData) ? chartJson.chartData : [];
+        rawPoints.sort((a, b) => Number(a.d ?? a.date ?? 0) - Number(b.d ?? b.date ?? 0));
+
+        // Group by Sri Lanka trading date (YYYY-MM-DD) so intraday ticks never inflate RSI
+        const dailyCloseMap = new Map<string, number>();
+        for (const p of rawPoints) {
+          const ts = Number(p.d ?? p.date ?? 0);
+          const priceVal = Number(p.p ?? p.price ?? p.close ?? p.y ?? 0);
+          if (ts > 0 && priceVal > 0) {
+            const dayKey = new Intl.DateTimeFormat('en-CA', {
+              timeZone: 'Asia/Colombo',
+              year: 'numeric',
+              month: '2-digit',
+              day: '2-digit',
+            }).format(new Date(ts));
+            dailyCloseMap.set(dayKey, priceVal);
+          }
+        }
+
+        if (latestPrice && latestPrice > 0) {
+          const todaySl = new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'Asia/Colombo',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+          }).format(new Date());
+          dailyCloseMap.set(todaySl, latestPrice);
+        }
+
+        closes = Array.from(dailyCloseMap.entries())
+          .sort((a, b) => a[0].localeCompare(b[0]))
+          .map(([, price]) => price);
+      }
+    } else if (latestPrice && latestPrice > 0) {
+      closes = [latestPrice];
+    }
+
+    const { rsi14, sma50, daysCount } = calculateIndicatorsFromCloses(closes);
+
+    res.json({
+      success: true,
+      symbol: cleanSymbol,
+      price: latestPrice,
+      rsi14,
+      sma50,
+      daysCount,
+      tradingViewUrl: `https://www.tradingview.com/chart/?symbol=CSELK%3A${encodeURIComponent(cleanSymbol)}`,
+    });
+  } catch (err: any) {
+    res.json({
+      success: false,
+      symbol: cleanSymbol,
+      rsi14: null,
+      sma50: null,
+      error: err?.message || 'Failed to fetch CSE technicals',
+    });
+  }
+});
+
+/**
  * Helper: Convert CSE date string like "25 Nov 2026" to ISO "2026-11-25"
  */
 function parseCseDateToIso(dateInput: any): string | null {
