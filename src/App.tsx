@@ -21,7 +21,7 @@ import { HoldingsTable } from './components/HoldingsTable';
 import { RealizedProfitTab } from './components/RealizedProfitTab';
 import { AmmaCapitalLedger } from './components/AmmaCapitalLedger';
 import { TradingPnLCalendar } from './components/TradingPnLCalendar';
-import { ReceiptVaultTab } from './components/ReceiptVaultTab';
+
 import { CSENewsTab } from './components/CSENewsTab';
 import { SettingsTab } from './components/SettingsTab';
 import { ATradExcelModal } from './components/ATradExcelModal';
@@ -713,7 +713,6 @@ export default function App() {
           <RealizedProfitTab
             state={state}
             onRecordWithdrawal={handleRecordWithdrawal}
-            onOpenReceiptVault={() => setActiveTab('vault')}
           />
         )}
 
@@ -748,14 +747,7 @@ export default function App() {
           />
         )}
 
-        {activeTab === 'vault' && (
-          <ReceiptVaultTab
-            receipts={state.receipts || []}
-            currency={state.settings.currency}
-            onAddReceipt={handleAddReceipt}
-            onDeleteReceipt={handleDeleteReceipt}
-          />
-        )}
+        
 
         {activeTab === 'settings' && (
           <SettingsTab
