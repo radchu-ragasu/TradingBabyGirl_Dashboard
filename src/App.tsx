@@ -16,7 +16,7 @@ import {
   PriceHistoryPoint
 } from './types';
 import { Navbar, NavTab } from './components/Navbar';
-import { SummaryMetrics } from './components/SummaryMetrics';
+
 import { HoldingsTable } from './components/HoldingsTable';
 import { RealizedProfitTab } from './components/RealizedProfitTab';
 import { AmmaCapitalLedger } from './components/AmmaCapitalLedger';
@@ -693,10 +693,7 @@ export default function App() {
           </div>
         )}
 
-        <SummaryMetrics
-          state={state}
-          onOpenProfitTab={() => setActiveTab('profit')}
-        />
+        
 
         {activeTab === 'portfolio' && (
           <HoldingsTable
