@@ -160,7 +160,46 @@ function calculateIndicatorsFromCloses(closes: number[]) {
 }
 
 /**
- * Endpoint: Fetch Live CSE Price + Historical 1-Year Daily Chart Data to compute exact RSI(14) & SMA(50)
+ * Helper: Fetch exact RSI(14) & SMA(50) directly from TradingView Sri Lanka Scanner (CSELK)
+ */
+async function fetchTradingViewTechnicals(cleanSymbol: string) {
+  try {
+    const tvTicker = `CSELK:${cleanSymbol}`;
+    const response = await fetch('https://scanner.tradingview.com/srilanka/scan', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Origin': 'https://www.tradingview.com',
+        'Referer': 'https://www.tradingview.com/',
+      },
+      body: JSON.stringify({
+        symbols: {
+          tickers: [tvTicker],
+          query: { types: [] },
+        },
+        columns: ['close', 'RSI', 'SMA50'],
+      }),
+    });
+
+    if (!response.ok) return null;
+    const json: any = await response.json();
+    const row = json?.data?.[0]?.d;
+    if (!Array.isArray(row)) return null;
+
+    const [closeVal, rsiVal, sma50Val] = row;
+    return {
+      price: typeof closeVal === 'number' && closeVal > 0 ? closeVal : null,
+      rsi14: typeof rsiVal === 'number' && !isNaN(rsiVal) ? Math.round(rsiVal * 100) / 100 : null,
+      sma50: typeof sma50Val === 'number' && !isNaN(sma50Val) ? Math.round(sma50Val * 100) / 100 : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Endpoint: Fetch Exact TradingView (CSELK) RSI(14) & SMA(50) with CSE Fallback
  */
 app.post('/api/cse/technicals', async (req: Request, res: Response): Promise<void> => {
   const { symbol } = req.body;
@@ -172,7 +211,22 @@ app.post('/api/cse/technicals', async (req: Request, res: Response): Promise<voi
   const cleanSymbol = symbol.trim().toUpperCase();
 
   try {
-    // 1. Get companyInfoSummery (includes stockId & current price)
+    // 1. Primary: Direct TradingView Sri Lanka Scanner (100% exact match with TradingView chart)
+    const tvData = await fetchTradingViewTechnicals(cleanSymbol);
+    if (tvData && (tvData.rsi14 !== null || tvData.sma50 !== null)) {
+      res.json({
+        success: true,
+        source: 'TRADINGVIEW_CSELK',
+        symbol: cleanSymbol,
+        price: tvData.price,
+        rsi14: tvData.rsi14,
+        sma50: tvData.sma50,
+        tradingViewUrl: `https://www.tradingview.com/chart/?symbol=CSELK%3A${encodeURIComponent(cleanSymbol)}`,
+      });
+      return;
+    }
+
+    // 2. Fallback: Direct CSE historical data if TradingView doesn't index the symbol
     const infoRes = await fetch('https://www.cse.lk/api/companyInfoSummery', {
       method: 'POST',
       headers: CSE_HEADERS,
@@ -197,14 +251,13 @@ app.post('/api/cse/technicals', async (req: Request, res: Response): Promise<voi
 
     let closes: number[] = [];
 
-    // 2. Fetch historical daily chart points from CSE using stockId
     if (stockId) {
       const chartRes = await fetch('https://www.cse.lk/api/companyChartDataByStock', {
         method: 'POST',
         headers: CSE_HEADERS,
         body: new URLSearchParams({
           stockId: String(stockId),
-          period: '5', // 5 = 1 Year (~240 trading days -> exact TradingView RSI-14 & SMA-50)
+          period: '5',
         }).toString(),
       });
 
@@ -213,7 +266,6 @@ app.post('/api/cse/technicals', async (req: Request, res: Response): Promise<voi
         const rawPoints: any[] = Array.isArray(chartJson?.chartData) ? chartJson.chartData : [];
         rawPoints.sort((a, b) => Number(a.d ?? a.date ?? 0) - Number(b.d ?? b.date ?? 0));
 
-        // Group by Sri Lanka trading date (YYYY-MM-DD) so intraday ticks never inflate RSI
         const dailyCloseMap = new Map<string, number>();
         for (const p of rawPoints) {
           const ts = Number(p.d ?? p.date ?? 0);
@@ -251,6 +303,7 @@ app.post('/api/cse/technicals', async (req: Request, res: Response): Promise<voi
 
     res.json({
       success: true,
+      source: 'CSE_HISTORICAL_FALLBACK',
       symbol: cleanSymbol,
       price: latestPrice,
       rsi14,
@@ -264,7 +317,7 @@ app.post('/api/cse/technicals', async (req: Request, res: Response): Promise<voi
       symbol: cleanSymbol,
       rsi14: null,
       sma50: null,
-      error: err?.message || 'Failed to fetch CSE technicals',
+      error: err?.message || 'Failed to fetch technicals',
     });
   }
 });
