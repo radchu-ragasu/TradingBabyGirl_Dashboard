@@ -170,7 +170,7 @@ export const HoldingsTable: React.FC<HoldingsTableProps> = ({
   onOpenContractNoteModal,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
-  const [filterMode, setFilterMode] = useState<'ALL' | 'ACTIVE' | 'LEGACY' | 'READY_TO_SELL' | 'BELOW_BREAKEVEN'>('ALL');
+  const [filterMode, setFilterMode] = useState<'ALL' | 'ACTIVE' | 'LEGACY' | 'READY_TO_SELL' | 'BUY_ZONE' | 'BELOW_BREAKEVEN'>('ALL');
   const [refreshingSymbols, setRefreshingSymbols] = useState<Record<string, boolean>>({});
   const [isRefreshingAll, setIsRefreshingAll] = useState(false);
   const [refreshProgress, setRefreshProgress] = useState<{ current: number; total: number } | null>(null);
@@ -207,11 +207,13 @@ export const HoldingsTable: React.FC<HoldingsTableProps> = ({
     if (filterMode === 'ACTIVE') return (h.tag || 'ACTIVE') === 'ACTIVE';
     if (filterMode === 'LEGACY') return (h.tag || 'ACTIVE') === 'LEGACY';
     if (filterMode === 'READY_TO_SELL') return isSellSignal(signal.type);
+    if (filterMode === 'BUY_ZONE') return signal.type === 'STRONG_BUY_ZONE';
     if (filterMode === 'BELOW_BREAKEVEN') return isBelowBreakevenSignal(signal.type);
     return true;
   });
 
   const readyToSellCount = holdingsWithSignals.filter((item) => isSellSignal(item.signal.type)).length;
+  const buyZoneCount = holdingsWithSignals.filter((item) => item.signal.type === 'STRONG_BUY_ZONE').length;
   const belowBreakevenCount = holdingsWithSignals.filter((item) => isBelowBreakevenSignal(item.signal.type)).length;
   const legacyCount = holdingsWithSignals.filter((item) => item.signal.type === 'LEGACY_DO_NOT_SELL').length;
 
@@ -414,6 +416,21 @@ export const HoldingsTable: React.FC<HoldingsTableProps> = ({
                 </span>
               )}
             </button>
+
+              <button
+              onClick={() => setFilterMode('BUY_ZONE')}
+              className={`px-3 py-1 rounded-lg text-2xs font-semibold transition-colors flex items-center space-x-1 ${
+                filterMode === 'BUY_ZONE' ? 'bg-sky-600 text-white shadow-2xs' : 'text-sky-800 hover:text-sky-950'
+              }`}
+            >
+              <span>Buy Zone</span>
+              {buyZoneCount > 0 && (
+                <span className={`px-1 rounded-full text-3xs ${filterMode === 'BUY_ZONE' ? 'bg-white text-sky-800' : 'bg-sky-100 text-sky-900'}`}>
+                  {buyZoneCount}
+                </span>
+              )}
+            </button>
+
             <button
               onClick={() => setFilterMode('BELOW_BREAKEVEN')}
               className={`px-3 py-1 rounded-lg text-2xs font-semibold transition-colors flex items-center space-x-1 ${
