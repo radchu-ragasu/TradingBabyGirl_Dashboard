@@ -20,13 +20,14 @@ export interface Holding {
   lastVerifiedUrl?: string | null;
   tag?: TradeTag;
   priceHistory?: PriceHistoryPoint[];
-  rsi14?: number | null;
-  sma50?: number | null;
   dividendInfo?: string | null;
   xdDate?: string | null;
   paymentDate?: string | null;
   technicalsStatus?: 'SYNCED' | 'UNAVAILABLE';
   notes?: string;
+  rsi14?: number | null;
+  prevRsi14?: number | null;
+  sma50?: number | null;
 }
 
 export type LedgerEntryType =

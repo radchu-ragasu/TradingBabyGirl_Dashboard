@@ -69,36 +69,43 @@ export function computeDecisionSignal(h: Holding): DecisionSignal {
   const netPnlPercent = h.avgCostPrice > 0 ? (netPnlPerShare / h.avgCostPrice) * 100 : 0;
 
   const hasRsi = typeof h.rsi14 === 'number';
+  const hasPrevRsi = typeof h.prevRsi14 === 'number';
   const hasSma = typeof h.sma50 === 'number';
-  const isRsiOversold = hasRsi && (h.rsi14 as number) <= 30;
-  const isRsiOverbought = hasRsi && (h.rsi14 as number) >= 70;
-  const isAboveSma50 = hasSma && mktPrice >= (h.sma50 as number);
-  const smaGapPercent = hasSma && (h.sma50 as number) > 0
-    ? ((mktPrice - (h.sma50 as number)) / (h.sma50 as number)) * 100
-    : 0;
+  const currentRsi = hasRsi ? (h.rsi14 as number) : 0;
+  const prevRsi = hasPrevRsi ? (h.prevRsi14 as number) : null;
 
-  // 1. BELOW BREAKEVEN (Loss Zone -> Check Buy / Average Down vs Wait)
+  const isStillBelow30 = hasRsi && currentRsi <= 30;
+  const isRsiBounceAbove30 =
+    hasRsi &&
+    currentRsi > 30 &&
+    currentRsi <= 42 &&
+    prevRsi !== null &&
+    prevRsi <= 30;
+  const isRsiOverbought = hasRsi && currentRsi >= 70;
+  const isAboveSma50 = hasSma && mktPrice >= (h.sma50 as number);
+
+  // 1. BELOW BREAKEVEN (Loss Zone -> Wait while RSI <= 30, Buy ONLY on >30 Reversal Bounce)
   if (netPnlPercent < 0) {
     const feeDiff = breakevenPrice - mktPrice;
     const neededPercent = mktPrice > 0 ? (feeDiff / mktPrice) * 100 : 0;
 
-    if (isRsiOversold) {
-      // If price crashed > 12% below SMA-50, warn against catching a falling knife
-      if (hasSma && smaGapPercent < -12) {
-        return {
-          type: 'FALLING_KNIFE_WAIT',
-          label: 'OVERSOLD • WAIT FOR BOUNCE',
-          badgeClass: 'bg-amber-50 text-amber-900 border border-amber-300 font-semibold',
-          subtext: `RSI ${h.rsi14?.toFixed(1)} • ${Math.abs(smaGapPercent).toFixed(0)}% below SMA50`,
-          breakevenPrice,
-          netPnlPercent,
-        };
-      }
+    if (isRsiBounceAbove30) {
       return {
         type: 'STRONG_BUY_ZONE',
-        label: 'BUY / AVG DOWN • OVERSOLD',
+        label: 'BUY / AVG DOWN • RSI >30 BOUNCE',
         badgeClass: 'bg-sky-50 text-sky-900 border border-sky-300 font-bold',
-        subtext: `RSI ${h.rsi14?.toFixed(1)}${hasSma ? ` • SMA50 Rs.${h.sma50?.toFixed(1)}` : ''}`,
+        subtext: `RSI ${prevRsi?.toFixed(1)} → ${currentRsi.toFixed(1)} (Reversal Confirmed)`,
+        breakevenPrice,
+        netPnlPercent,
+      };
+    }
+
+    if (isStillBelow30) {
+      return {
+        type: 'FALLING_KNIFE_WAIT',
+        label: 'OVERSOLD • WAIT FOR >30 BOUNCE',
+        badgeClass: 'bg-amber-50 text-amber-900 border border-amber-300 font-semibold',
+        subtext: `RSI ${currentRsi.toFixed(1)} (<=30) • Do not catch falling knife`,
         breakevenPrice,
         netPnlPercent,
       };
@@ -248,9 +255,16 @@ export const HoldingsTable: React.FC<HoldingsTableProps> = ({
         fetchTechnicalsForSymbol(holding.symbol),
       ]);
       const updated = applyQuoteToHolding(holding, quote);
+      const nextRsi = typeof tech?.rsi14 === 'number' ? tech.rsi14 : updated.rsi14 ?? null;
+      const previousRsi =
+        typeof holding.rsi14 === 'number' && nextRsi !== null && holding.rsi14 !== nextRsi
+          ? holding.rsi14
+          : holding.prevRsi14 ?? null;
+
       onUpdateHolding({
         ...updated,
-        rsi14: typeof tech?.rsi14 === 'number' ? tech.rsi14 : updated.rsi14 ?? null,
+        prevRsi14: previousRsi,
+        rsi14: nextRsi,
         sma50: typeof tech?.sma50 === 'number' ? tech.sma50 : updated.sma50 ?? null,
       });
     } catch (err) {
@@ -307,9 +321,16 @@ export const HoldingsTable: React.FC<HoldingsTableProps> = ({
           xdDate: liveDiv?.xdDate || null,
         };
         const updated = applyQuoteToHolding(h, mergedQuote);
+        const nextRsi = typeof tech?.rsi14 === 'number' ? tech.rsi14 : updated.rsi14 ?? null;
+        const previousRsi =
+          typeof h.rsi14 === 'number' && nextRsi !== null && h.rsi14 !== nextRsi
+            ? h.rsi14
+            : h.prevRsi14 ?? null;
+
         onUpdateHolding({
           ...updated,
-          rsi14: typeof tech?.rsi14 === 'number' ? tech.rsi14 : updated.rsi14 ?? null,
+          prevRsi14: previousRsi,
+          rsi14: nextRsi,
           sma50: typeof tech?.sma50 === 'number' ? tech.sma50 : updated.sma50 ?? null,
         });
       } catch (err) {
@@ -417,7 +438,7 @@ export const HoldingsTable: React.FC<HoldingsTableProps> = ({
               )}
             </button>
 
-              <button
+            <button
               onClick={() => setFilterMode('BUY_ZONE')}
               className={`px-3 py-1 rounded-lg text-2xs font-semibold transition-colors flex items-center space-x-1 ${
                 filterMode === 'BUY_ZONE' ? 'bg-sky-600 text-white shadow-2xs' : 'text-sky-800 hover:text-sky-950'
@@ -655,7 +676,7 @@ export const HoldingsTable: React.FC<HoldingsTableProps> = ({
                             h.rsi14 >= 70
                               ? 'Overbought (>=70) — Consider taking profit'
                               : h.rsi14 <= 30
-                              ? 'Oversold (<=30) — Potential buy/average-down zone'
+                              ? 'Oversold (<=30) — Wait for >30 bounce before buying'
                               : 'Neutral Momentum (30–70)'
                           }
                           className={`font-mono text-2xs font-bold px-2.5 py-0.5 rounded-full tabular-nums ${
@@ -738,7 +759,7 @@ export const HoldingsTable: React.FC<HoldingsTableProps> = ({
                             ? 'text-[#15803D]'
                             : pnl < 0
                             ? 'text-[#B91C1C]'
-                            : 'text-slate-600'
+                            : 'text-slate-700'
                         }`}
                       >
                         {pnl >= 0 ? '+' : ''}
@@ -746,11 +767,11 @@ export const HoldingsTable: React.FC<HoldingsTableProps> = ({
                       </div>
                       <div
                         className={`text-2xs font-medium tabular-nums ${
-                          pnlPercent > 0
+                          pnl > 0
                             ? 'text-[#15803D]'
-                            : pnlPercent < 0
+                            : pnl < 0
                             ? 'text-[#B91C1C]'
-                            : 'text-slate-400'
+                            : 'text-slate-500'
                         }`}
                       >
                         {pnlPercent >= 0 ? '+' : ''}
@@ -758,37 +779,28 @@ export const HoldingsTable: React.FC<HoldingsTableProps> = ({
                       </div>
                     </td>
 
-                    <td className="py-4 px-4 text-right whitespace-nowrap sticky right-0 z-10 bg-white group-hover:bg-slate-50 transition-colors shadow-[-6px_0_12px_-6px_rgba(15,23,42,0.12)]">
-                      <div className="flex items-center justify-end space-x-1.5">
-                        <button
-                          onClick={() => onOpenSellModal(h)}
-                          title="Sell Shares & Preview 70/30 Split"
-                          className={`px-2.5 py-1 text-2xs font-semibold rounded-lg transition-colors ${
-                            isSellSignal(signal.type)
-                              ? 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-2xs font-bold'
-                              : 'text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200'
-                          }`}
-                        >
-                          Sell (70/30)
-                        </button>
-
+                    <td className="py-4 px-4 text-right whitespace-nowrap sticky right-0 z-10 bg-white group-hover:bg-slate-50 shadow-[-6px_0_12px_-6px_rgba(15,23,42,0.10)]">
+                      <div className="inline-flex items-center justify-end space-x-1.5">
                         <button
                           onClick={() => handleRefreshSingle(h)}
                           disabled={isRefreshing}
-                          title="Sync Live Price, 14D RSI & SMA-50 from cse.lk"
-                          className="p-1 text-slate-400 hover:text-slate-800 hover:bg-slate-100 rounded-lg transition-colors"
+                          title="Sync Live CSE Price, RSI & SMA-50"
+                          className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors border border-transparent hover:border-slate-200"
                         >
-                          <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-slate-400' : ''}`} />
+                          <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-teal-600' : ''}`} />
                         </button>
 
                         <button
-                          onClick={() => {
-                            if (window.confirm(`Remove ${h.symbol} from portfolio?`)) {
-                              onDeleteHolding(h.id);
-                            }
-                          }}
+                          onClick={() => onOpenSellModal(h)}
+                          className="px-2.5 py-1 text-xs font-semibold text-teal-900 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded-lg transition-colors shadow-2xs"
+                        >
+                          Sell
+                        </button>
+
+                        <button
+                          onClick={() => onDeleteHolding(h.id)}
                           title="Remove Holding"
-                          className="p-1 text-slate-300 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"
+                          className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"
                         >
                           <MinusCircle className="w-3.5 h-3.5" />
                         </button>
