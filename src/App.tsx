@@ -15,6 +15,7 @@ import {
   ReceiptDocument,
   PriceHistoryPoint
 } from './types';
+import { WatchlistTab } from './components/WatchlistTab';
 import { Navbar, NavTab } from './components/Navbar';
 
 import { HoldingsTable } from './components/HoldingsTable';
@@ -693,6 +694,9 @@ function recordPriceAndComputeTechnicals(
           </div>
         )}
 
+        {activeTab === 'watchlist' && (
+          <WatchlistTab ownedSymbols={state.holdings.map((h) => h.symbol.toUpperCase())} />
+        )}
         
 
         {activeTab === 'portfolio' && (
@@ -708,6 +712,8 @@ function recordPriceAndComputeTechnicals(
             onOpenNewsTab={() => setActiveTab('news')}
           />
         )}
+
+        
 
         {activeTab === 'profit' && (
           <RealizedProfitTab

@@ -154,3 +154,15 @@ export interface CSEQuoteResult {
   errorDetails?: string | null;
   sourceUrls?: string[];
 }
+
+export interface WatchlistItem {
+  id: string;
+  symbol: string;
+  companyName: string;
+  targetPrice?: number | null;
+  marketPrice?: number | null;
+  rsi14?: number | null;
+  prevRsi14?: number | null;
+  sma50?: number | null;
+  lastSynced?: string | null;
+}
