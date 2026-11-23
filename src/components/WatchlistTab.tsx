@@ -9,7 +9,9 @@ import {
   AlertTriangle,
   Clock,
   Eye,
-  Search
+  Search,
+  Sparkles,
+  Check
 } from 'lucide-react';
 import { fetchLiveCsePrice } from '../services/csePriceService';
 
@@ -36,6 +38,77 @@ function saveWatchlist(items: WatchlistItem[]) {
   } catch {
     // Ignore storage quota errors
   }
+}
+
+/**
+ * Compute AI-suggested technical entry price using Live Price, 14D RSI, and SMA-50
+ */
+function computeAiSuggestedBuyPrice(item: WatchlistItem): {
+  suggestedPrice: number | null;
+  discountPct: number | null;
+  rationale: string;
+} {
+  const price = typeof item.marketPrice === 'number' && item.marketPrice > 0 ? item.marketPrice : null;
+  const rsi = typeof item.rsi14 === 'number' ? item.rsi14 : null;
+  const sma = typeof item.sma50 === 'number' && item.sma50 > 0 ? item.sma50 : null;
+
+  if (!price) {
+    return { suggestedPrice: null, discountPct: null, rationale: 'Sync price first' };
+  }
+
+  // Case 1: Already oversold (RSI <= 30) -> Suggest waiting for >30 bounce confirmation slightly above current floor
+  if (rsi !== null && rsi <= 30) {
+    const bounceTrigger = Number((price * 1.015).toFixed(2));
+    return {
+      suggestedPrice: bounceTrigger,
+      discountPct: 1.5,
+      rationale: 'Buy on >30 RSI bounce',
+    };
+  }
+
+  // Case 2: Both RSI and SMA-50 available -> Blend RSI-32 pullback estimate & SMA-50 support
+  if (rsi !== null && sma !== null) {
+    // Estimate % pullback needed for RSI to cool toward ~32
+    const rsiExcess = Math.max(0, rsi - 32);
+    const rsiPullbackFactor = Math.min(0.22, rsiExcess * 0.0032);
+    const rsiTarget = price * (1 - rsiPullbackFactor);
+
+    // Support zone below SMA-50 (4% under SMA-50 where oversold bounces typically form)
+    const smaSupport = sma * 0.96;
+
+    // Pick the safer (lower) realistic entry floor, capped within 3% to 20% below live price
+    const rawTarget = Math.min(rsiTarget, smaSupport);
+    const minFloor = price * 0.80;
+    const maxCeiling = price * 0.97;
+    const finalTarget = Number(Math.max(minFloor, Math.min(maxCeiling, rawTarget)).toFixed(2));
+    const discountPct = ((price - finalTarget) / price) * 100;
+
+    return {
+      suggestedPrice: finalTarget,
+      discountPct,
+      rationale: `Est. RSI ~32 & SMA50 support`,
+    };
+  }
+
+  // Case 3: Only SMA-50 available
+  if (sma !== null) {
+    const rawTarget = sma * 0.96;
+    const finalTarget = Number(Math.min(price * 0.97, rawTarget).toFixed(2));
+    const discountPct = ((price - finalTarget) / price) * 100;
+    return {
+      suggestedPrice: finalTarget,
+      discountPct,
+      rationale: '4% below SMA-50 support',
+    };
+  }
+
+  // Case 4: Fallback 6% pullback from current price
+  const fallbackTarget = Number((price * 0.94).toFixed(2));
+  return {
+    suggestedPrice: fallbackTarget,
+    discountPct: 6.0,
+    rationale: '6% pullback entry zone',
+  };
 }
 
 function getWatchlistBuySignal(item: WatchlistItem) {
@@ -191,6 +264,22 @@ export const WatchlistTab: React.FC<WatchlistTabProps> = ({ ownedSymbols }) => {
     setIsSyncingAll(false);
   };
 
+  const handleApplyAiTarget = (id: string, price: number) => {
+    setItems((prev) =>
+      prev.map((item) => (item.id === id ? { ...item, targetPrice: price } : item))
+    );
+  };
+
+  const handleApplyAllAiTargets = () => {
+    setItems((prev) =>
+      prev.map((item) => {
+        if (typeof item.targetPrice === 'number' && item.targetPrice > 0) return item;
+        const ai = computeAiSuggestedBuyPrice(item);
+        return ai.suggestedPrice ? { ...item, targetPrice: ai.suggestedPrice } : item;
+      })
+    );
+  };
+
   const handleAddWatchlist = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!symbolInput.trim()) return;
@@ -221,7 +310,6 @@ export const WatchlistTab: React.FC<WatchlistTabProps> = ({ ownedSymbols }) => {
     setCompanyInput('');
     setTargetPriceInput('');
 
-    // Auto-sync live price & RSI immediately after adding
     await syncSingleItem(newItem);
   };
 
@@ -232,6 +320,7 @@ export const WatchlistTab: React.FC<WatchlistTabProps> = ({ ownedSymbols }) => {
   const enrichedItems = items.map((item) => ({
     item,
     signal: getWatchlistBuySignal(item),
+    aiSuggestion: computeAiSuggestedBuyPrice(item),
   }));
 
   const buyZoneCount = enrichedItems.filter(
@@ -262,26 +351,38 @@ export const WatchlistTab: React.FC<WatchlistTabProps> = ({ ownedSymbols }) => {
           <div>
             <div className="flex items-center space-x-2">
               <h2 className="text-base font-semibold text-slate-900 tracking-tight">
-                CSE Watchlist & Buy Zone Radar
+                CSE Watchlist & AI Buy Zone Radar
               </h2>
               <span className="text-2xs px-2.5 py-0.5 rounded-full bg-sky-50 text-sky-800 font-semibold border border-sky-200">
-                RSI &gt;30 Reversal Detector
+                RSI &gt;30 Reversal + AI Entry Price
               </span>
             </div>
             <p className="text-xs text-slate-500 mt-1">
-              Track stocks you plan to buy. Alerts <span className="font-semibold text-sky-800">BUY ZONE</span> when RSI drops ≤30 and bounces back above 30.
+              AI calculates ideal pullback entry prices from <span className="font-semibold text-slate-700">14D RSI &amp; SMA-50</span> and alerts <span className="font-semibold text-sky-800">BUY ZONE</span> on &gt;30 bounce.
             </p>
           </div>
 
-          <button
-            type="button"
-            onClick={handleSyncAll}
-            disabled={isSyncingAll || items.length === 0}
-            className="inline-flex items-center space-x-1.5 px-3.5 py-2 text-xs font-semibold bg-slate-900 text-white rounded-xl hover:bg-slate-800 transition-colors shadow-2xs disabled:opacity-50"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${isSyncingAll ? 'animate-spin' : ''}`} />
-            <span>{isSyncingAll ? 'Syncing Watchlist...' : 'Sync Watchlist RSI'}</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleApplyAllAiTargets}
+              disabled={items.length === 0}
+              className="inline-flex items-center space-x-1.5 px-3.5 py-2 text-xs font-semibold bg-indigo-50 text-indigo-900 border border-indigo-200 rounded-xl hover:bg-indigo-100 transition-colors shadow-2xs disabled:opacity-50"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
+              <span>Set All AI Targets</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleSyncAll}
+              disabled={isSyncingAll || items.length === 0}
+              className="inline-flex items-center space-x-1.5 px-3.5 py-2 text-xs font-semibold bg-slate-900 text-white rounded-xl hover:bg-slate-800 transition-colors shadow-2xs disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isSyncingAll ? 'animate-spin' : ''}`} />
+              <span>{isSyncingAll ? 'Syncing Watchlist...' : 'Sync Watchlist RSI'}</span>
+            </button>
+          </div>
         </div>
 
         <form onSubmit={handleAddWatchlist} className="mt-4 grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
@@ -314,12 +415,12 @@ export const WatchlistTab: React.FC<WatchlistTabProps> = ({ ownedSymbols }) => {
 
           <div>
             <label className="block text-2xs font-semibold text-slate-600 mb-1">
-              Target Buy Price (Rs.)
+              Custom Target Price (Rs.)
             </label>
             <input
               type="number"
               step="0.01"
-              placeholder="Optional target"
+              placeholder="Or leave blank for AI target"
               value={targetPriceInput}
               onChange={(e) => setTargetPriceInput(e.target.value)}
               className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-hidden focus:ring-2 focus:ring-slate-900 tabular-nums"
@@ -407,7 +508,8 @@ export const WatchlistTab: React.FC<WatchlistTabProps> = ({ ownedSymbols }) => {
                 <tr className="border-b border-slate-200 bg-slate-50/60 text-slate-500 font-semibold uppercase tracking-wider text-2xs">
                   <th className="py-3.5 px-4">Symbol / Chart</th>
                   <th className="py-3.5 px-4 text-right">Live Price</th>
-                  <th className="py-3.5 px-4 text-right">Target Price</th>
+                  <th className="py-3.5 px-4 text-right">AI Suggested Buy</th>
+                  <th className="py-3.5 px-4 text-right">Your Target</th>
                   <th className="py-3.5 px-4 text-left">Entry Signal</th>
                   <th className="py-3.5 px-4 text-center">14D RSI (Prev → Now)</th>
                   <th className="py-3.5 px-4 text-right">SMA-50</th>
@@ -415,10 +517,14 @@ export const WatchlistTab: React.FC<WatchlistTabProps> = ({ ownedSymbols }) => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {filteredItems.map(({ item, signal }) => {
+                {filteredItems.map(({ item, signal, aiSuggestion }) => {
                   const isSyncing = !!syncingSymbols[item.symbol];
                   const isAlreadyOwned = ownedSymbols.includes(item.symbol.toUpperCase());
                   const tradingViewUrl = `https://www.tradingview.com/chart/?symbol=CSELK%3A${encodeURIComponent(item.symbol)}`;
+                  const isTargetApplied =
+                    typeof item.targetPrice === 'number' &&
+                    aiSuggestion.suggestedPrice !== null &&
+                    Math.abs(item.targetPrice - aiSuggestion.suggestedPrice) < 0.01;
 
                   return (
                     <tr key={item.id} className="hover:bg-slate-50/80 transition-colors">
@@ -451,7 +557,40 @@ export const WatchlistTab: React.FC<WatchlistTabProps> = ({ ownedSymbols }) => {
                         {typeof item.marketPrice === 'number' ? `Rs. ${item.marketPrice.toFixed(2)}` : '—'}
                       </td>
 
-                      <td className="py-3.5 px-4 text-right font-mono text-slate-600 tabular-nums">
+                      {/* AI Suggested Buy Price Column */}
+                      <td className="py-3.5 px-4 text-right whitespace-nowrap">
+                        {aiSuggestion.suggestedPrice !== null ? (
+                          <div className="inline-flex flex-col items-end">
+                            <div className="flex items-center space-x-1.5">
+                              <span className="font-mono font-bold text-indigo-700 tabular-nums">
+                                Rs. {aiSuggestion.suggestedPrice.toFixed(2)}
+                              </span>
+                              {!isTargetApplied ? (
+                                <button
+                                  type="button"
+                                  onClick={() => handleApplyAiTarget(item.id, aiSuggestion.suggestedPrice!)}
+                                  title="Use AI suggested price as your Target Price"
+                                  className="px-1.5 py-0.5 text-3xs font-semibold bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 rounded-md transition-colors"
+                                >
+                                  Apply
+                                </button>
+                              ) : (
+                                <span className="inline-flex items-center text-3xs text-emerald-700 font-semibold">
+                                  <Check className="w-3 h-3" />
+                                </span>
+                              )}
+                            </div>
+                            <span className="text-3xs text-slate-400 font-mono">
+                              {aiSuggestion.discountPct !== null ? `-${aiSuggestion.discountPct.toFixed(1)}% • ` : ''}
+                              {aiSuggestion.rationale}
+                            </span>
+                          </div>
+                        ) : (
+                          <span className="text-3xs text-slate-400 font-mono">—</span>
+                        )}
+                      </td>
+
+                      <td className="py-3.5 px-4 text-right font-mono text-slate-700 font-semibold tabular-nums">
                         {typeof item.targetPrice === 'number' ? `Rs. ${item.targetPrice.toFixed(2)}` : '—'}
                       </td>
 
