@@ -869,3 +869,6 @@ function recordPriceAndComputeTechnicals(
     </div>
   );
 }
+
+
+//Happy ending Vro
