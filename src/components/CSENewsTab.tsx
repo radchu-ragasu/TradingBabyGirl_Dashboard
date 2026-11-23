@@ -1,8 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { CSENewsItem, Holding } from '../types';
+import { CSENewsItem, Holding, Trade } from '../types';
 import {
   Plus,
-  Coins,
   Search,
   Sparkles,
   CheckCircle2,
@@ -22,6 +21,7 @@ import {
 
 interface CSENewsTabProps {
   holdings: Holding[];
+  trades?: Trade[];
   newsItems: CSENewsItem[];
   lastSync: string | null;
   isSyncing: boolean;
@@ -32,11 +32,11 @@ interface CSENewsTabProps {
 }
 
 export interface DividendBookEntry {
-  key: string; // e.g. "ACL.N0000_2026-11-25"
+  key: string;
   symbol: string;
   companyName: string;
   year: number;
-  monthIndex: number; // 0 = Jan ... 11 = Dec
+  monthIndex: number;
   monthName: string;
   xdDate: string;
   paymentDate: string | null;
@@ -93,6 +93,46 @@ function isPaymentCompleted(item: CSENewsItem): boolean {
   return false;
 }
 
+/**
+ * Calculate exact eligible shares held BEFORE the Ex-Dividend (XD) Date.
+ * Under CSE rules, shares bought ON or AFTER the XD Date do NOT receive the dividend.
+ */
+function computeEligibleSharesBeforeXd(
+  symbol: string,
+  currentHolding: Holding | undefined,
+  trades: Trade[],
+  xdDateStr?: string | null
+): { eligibleQty: number; boughtAfterXdQty: number } {
+  const currentQty = currentHolding?.quantity ?? 0;
+  if (currentQty <= 0 || !xdDateStr) {
+    return { eligibleQty: currentQty, boughtAfterXdQty: 0 };
+  }
+
+  const cleanTarget = symbol.toUpperCase().split('.')[0];
+  const matchingTrades = trades.filter(
+    (t) => t.symbol.toUpperCase().split('.')[0] === cleanTarget
+  );
+
+  if (matchingTrades.length === 0) {
+    return { eligibleQty: currentQty, boughtAfterXdQty: 0 };
+  }
+
+  let postXdNetBought = 0;
+  for (const t of matchingTrades) {
+    if (!t.date) continue;
+    const tradeDay = t.date.slice(0, 10);
+    if (tradeDay >= xdDateStr.slice(0, 10)) {
+      if (t.type === 'BUY') postXdNetBought += t.quantity;
+      if (t.type === 'SELL') postXdNetBought -= t.quantity;
+    }
+  }
+
+  const boughtAfterXdQty = Math.max(0, postXdNetBought);
+  const eligibleQty = Math.max(0, currentQty - boughtAfterXdQty);
+
+  return { eligibleQty, boughtAfterXdQty };
+}
+
 function loadDividendBook(): DividendBookEntry[] {
   try {
     const raw = localStorage.getItem(BOOK_STORAGE_KEY);
@@ -123,7 +163,6 @@ function getDividendEntryVerdict(
       ? (dividendAmount / price) * 100
       : null;
 
-  // 1. Check if Dividend Yield is smaller than 2.24% CSE Round-Trip Fees (Buy 1.12% + Sell 1.12%)
   if (divYieldPct !== null && divYieldPct < 2.24) {
     return {
       type: 'FEE_LOSS',
@@ -174,6 +213,7 @@ function getDividendEntryVerdict(
 
 export const CSENewsTab: React.FC<CSENewsTabProps> = ({
   holdings,
+  trades = [],
   newsItems,
   lastSync,
   isSyncing,
@@ -187,10 +227,8 @@ export const CSENewsTab: React.FC<CSENewsTabProps> = ({
   const [selectedMonth, setSelectedMonth] = useState<number | 'ALL'>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Permanent Seasonality Book State
   const [dividendBook, setDividendBook] = useState<DividendBookEntry[]>(() => loadDividendBook());
 
-  // Quick Add Form State
   const [symbol, setSymbol] = useState('');
   const [companyName, setCompanyName] = useState('');
   const [dividendAmount, setDividendAmount] = useState('');
@@ -199,21 +237,17 @@ export const CSENewsTab: React.FC<CSENewsTabProps> = ({
   const [sharePrice, setSharePrice] = useState('');
   const [notes, setNotes] = useState('');
 
-  // What-If Simulator quantities + Live Prices + Live Technicals (RSI/SMA50)
   const [simQuantities, setSimQuantities] = useState<Record<string, string>>({});
   const [livePrices, setLivePrices] = useState<Record<string, number>>({});
   const [liveTechnicals, setLiveTechnicals] = useState<Record<string, TechnicalSnapshot>>({});
   const [isFetchingPrices, setIsFetchingPrices] = useState(false);
 
-  // Map owned holdings for instant lookup
   const ownedMap = new Map<string, Holding>();
   holdings.forEach((h) => {
     ownedMap.set(h.symbol.toUpperCase(), h);
     ownedMap.set(h.symbol.toUpperCase().split('.')[0], h);
   });
 
-  // 1. Archive every 2026+ item into the Permanent Seasonality Book BEFORE removing completed ones
-  // 2. Auto-purge pre-2026 clutter AND items whose Payment Date has already passed
   useEffect(() => {
     const valid2026 = newsItems.filter(isValidDividendItem);
 
@@ -280,12 +314,10 @@ export const CSENewsTab: React.FC<CSENewsTabProps> = ({
     }
   }, [newsItems, onDeleteDividendItem]);
 
-  // Active Radar items: 2026+ AND Payment Date not yet passed
   const activeRadarItems = newsItems.filter(
     (item) => isValidDividendItem(item) && !isPaymentCompleted(item)
   );
 
-  // Fetch live share prices + TradingView RSI(14) & SMA(50) for active radar items
   const syncLivePricesAndTechnicals = async () => {
     if (activeRadarItems.length === 0) return;
     setIsFetchingPrices(true);
@@ -442,7 +474,6 @@ export const CSENewsTab: React.FC<CSENewsTabProps> = ({
     };
   };
 
-  // Enrich active radar items with Price + RSI(14) + SMA(50)
   const enrichedDividends = activeRadarItems
     .map((item) => {
       const matched = ownedMap.get(item.symbol.toUpperCase()) || ownedMap.get(item.symbol.toUpperCase().split('.')[0]);
@@ -480,9 +511,16 @@ export const CSENewsTab: React.FC<CSENewsTabProps> = ({
           : null;
 
       const ownedQty = matched?.quantity ?? 0;
+      const { eligibleQty, boughtAfterXdQty } = computeEligibleSharesBeforeXd(
+        item.symbol,
+        matched,
+        trades,
+        item.xdDate
+      );
+
       const expectedTotalPayout =
-        isOwned && ownedQty > 0 && item.dividendAmount
-          ? ownedQty * item.dividendAmount
+        isOwned && eligibleQty > 0 && item.dividendAmount
+          ? eligibleQty * item.dividendAmount
           : null;
 
       return {
@@ -493,6 +531,8 @@ export const CSENewsTab: React.FC<CSENewsTabProps> = ({
         resolvedRsi14,
         resolvedSma50,
         ownedQty,
+        eligibleQty,
+        boughtAfterXdQty,
         expectedTotalPayout,
       };
     })
@@ -510,7 +550,6 @@ export const CSENewsTab: React.FC<CSENewsTabProps> = ({
     return matchesOwnership && matchesSearch;
   });
 
-  // Filter Seasonality Book by Month & Search
   const filteredBook = dividendBook.filter((entry) => {
     const matchesMonth = selectedMonth === 'ALL' || entry.monthIndex === selectedMonth;
     const matchesSearch =
@@ -532,14 +571,14 @@ export const CSENewsTab: React.FC<CSENewsTabProps> = ({
           <div>
             <div className="flex flex-wrap items-center gap-2">
               <h2 className="text-base font-semibold text-slate-900 tracking-tight">
-                CSE Dividend Radar & Seasonality Book
+                CSE Dividend Radar &amp; Seasonality Book
               </h2>
               <span className="text-2xs px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-800 font-semibold border border-emerald-200">
-                ● Live RSI, SMA-50 & Net Fee Check (2.24%)
+                ● Live RSI, SMA-50 &amp; Net Fee Check (2.24%)
               </span>
             </div>
             <p className="text-xs text-slate-500 mt-1">
-              Automatically warns if Dividend is lower than 2.24% Buy+Sell CSE fees or if RSI is overbought before XD.
+              Counts dividends ONLY for shares held before XD Date, and warns if yield is below 2.24% Buy+Sell CSE fees.
               {lastSync && (
                 <span className="ml-2 text-slate-400 font-mono">
                   • Synced: {new Date(lastSync).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
@@ -719,7 +758,7 @@ export const CSENewsTab: React.FC<CSENewsTabProps> = ({
       </div>
 
       {activeSubTab === 'RADAR' ? (
-        /* TAB 1: LIVE ACTIVE RADAR (Auto-clears once Payment Date passes) */
+        /* TAB 1: ORIGINAL CLEAN CARD RADAR WITH RIGHT-ALIGNED METRIC BOXES */
         <div className="bg-white rounded-2xl border border-slate-200/90 shadow-xs overflow-hidden">
           <div className="p-4 sm:p-5 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3 bg-slate-50/50">
             <div className="flex flex-wrap items-center gap-1.5">
@@ -784,9 +823,10 @@ export const CSENewsTab: React.FC<CSENewsTabProps> = ({
                 return (
                   <div
                     key={item.id}
-                    className="p-4 sm:p-5 hover:bg-slate-50/80 transition-colors flex flex-col lg:flex-row lg:items-center justify-between gap-4 text-xs"
+                    className="p-4 sm:p-5 hover:bg-slate-50/70 transition-colors flex flex-col xl:flex-row xl:items-center justify-between gap-4 text-xs"
                   >
-                    <div className="space-y-2">
+                    {/* Left Side: Symbol + Badges + Clean Calculator Row */}
+                    <div className="space-y-2.5">
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="font-bold text-slate-900 text-sm">{item.symbol}</span>
 
@@ -800,13 +840,23 @@ export const CSENewsTab: React.FC<CSENewsTabProps> = ({
                           <LineChart className="w-3.5 h-3.5" />
                         </a>
 
-                        <span className="text-slate-500 text-2xs">{item.companyName}</span>
+                        <span className="text-slate-400 text-2xs">{item.companyName}</span>
 
                         {item.isOwned ? (
-                          <span className="inline-flex items-center space-x-1 text-3xs font-semibold px-2.5 py-0.5 rounded-full bg-teal-50 text-teal-800 border border-teal-200">
-                            <CheckCircle2 className="w-3 h-3" />
-                            <span>In Portfolio ({item.ownedQty.toLocaleString()} sh)</span>
-                          </span>
+                          item.eligibleQty > 0 ? (
+                            <span className="inline-flex items-center space-x-1 text-3xs font-semibold px-2.5 py-0.5 rounded-full bg-teal-50 text-teal-800 border border-teal-200">
+                              <CheckCircle2 className="w-3 h-3" />
+                              <span>
+                                Eligible ({item.eligibleQty.toLocaleString()} sh)
+                                {item.boughtAfterXdQty > 0 ? ` • ${item.boughtAfterXdQty} after XD` : ''}
+                              </span>
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center space-x-1 text-3xs font-semibold px-2.5 py-0.5 rounded-full bg-rose-50 text-rose-800 border border-rose-200">
+                              <AlertTriangle className="w-3 h-3" />
+                              <span>Bought On/After XD (Not Eligible)</span>
+                            </span>
+                          )
                         ) : (
                           <span className="inline-flex items-center space-x-1 text-3xs font-semibold px-2.5 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200">
                             <Sparkles className="w-3 h-3" />
@@ -829,33 +879,24 @@ export const CSENewsTab: React.FC<CSENewsTabProps> = ({
                             {(entryVerdict.type === 'TRAP' || entryVerdict.type === 'FEE_LOSS') && (
                               <AlertTriangle className="w-3 h-3 text-rose-600" />
                             )}
-                            {entryVerdict.type === 'OVERSOLD' && <TrendingDown className="w-3 h-3 text-sky-700" />}
                             {entryVerdict.type === 'GOOD' && <TrendingUp className="w-3 h-3 text-emerald-700" />}
+                            {entryVerdict.type === 'OVERSOLD' && <TrendingDown className="w-3 h-3 text-sky-700" />}
                             <span>{entryVerdict.label}</span>
                           </span>
                         )}
                       </div>
 
-                      {item.expectedTotalPayout !== null && (
-                        <div className="text-2xs font-semibold text-emerald-800 flex items-center space-x-1.5">
-                          <Coins className="w-3.5 h-3.5 text-emerald-600" />
-                          <span>
-                            Your Total Dividend Payout: LKR{' '}
-                            {item.expectedTotalPayout.toLocaleString('en-LK', { minimumFractionDigits: 2 })}
-                          </span>
-                        </div>
-                      )}
-
-                      {!item.isOwned && item.dividendAmount && (
-                        <div className="inline-flex flex-wrap items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-2xs">
-                          <span className="inline-flex items-center space-x-1 font-semibold text-slate-800">
-                            <Calculator className="w-3.5 h-3.5 text-slate-600" />
+                      {/* Subtle Simulator Bar */}
+                      {item.dividendAmount && item.dividendAmount > 0 && (
+                        <div className="inline-flex flex-wrap items-center gap-2 text-2xs bg-slate-50/90 px-3 py-1.5 rounded-xl border border-slate-200/80">
+                          <span className="inline-flex items-center space-x-1 text-slate-500 font-medium">
+                            <Calculator className="w-3.5 h-3.5 text-slate-400" />
                             <span>If I buy</span>
                           </span>
                           <input
                             type="number"
                             min="1"
-                            step="1"
+                            step="100"
                             value={rawSimQty}
                             onChange={(e) =>
                               setSimQuantities((prev) => ({
@@ -863,38 +904,38 @@ export const CSENewsTab: React.FC<CSENewsTabProps> = ({
                                 [item.id]: e.target.value,
                               }))
                             }
-                            className="w-20 px-2 py-0.5 text-xs font-bold text-slate-900 bg-white border border-slate-300 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-slate-900 tabular-nums text-right"
+                            className="w-16 px-2 py-0.5 text-2xs font-mono font-bold bg-white border border-slate-300 rounded-md focus:outline-hidden focus:ring-1 focus:ring-slate-900 tabular-nums text-center"
                           />
-                          <span className="text-slate-700 font-medium">shares</span>
+                          <span className="text-slate-500">shares</span>
 
                           {grossInvest !== null && (
-                            <span className="text-slate-500 font-mono text-3xs">
-                              (Capital: LKR {grossInvest.toLocaleString('en-LK', { maximumFractionDigits: 0 })})
+                            <span className="text-slate-500 font-mono">
+                              (Capital: <strong className="text-slate-800">LKR {grossInvest.toLocaleString('en-LK', { maximumFractionDigits: 0 })}</strong>)
                             </span>
                           )}
 
                           {simulatedDividend !== null && (
-                            <span className="font-bold text-emerald-800 tabular-nums">
-                              • Div: LKR {simulatedDividend.toLocaleString('en-LK', { minimumFractionDigits: 2 })}
+                            <span className="font-bold text-emerald-800 font-mono tabular-nums">
+                              • Div: LKR {simulatedDividend.toLocaleString('en-LK', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                             </span>
                           )}
 
                           {roundTripFees !== null && (
-                            <span className="text-slate-500 font-mono text-3xs">
-                              • Buy+Sell Fees (2.24%): -LKR {roundTripFees.toLocaleString('en-LK', { maximumFractionDigits: 0 })}
+                            <span className="text-slate-500 font-mono">
+                              • Buy+Sell Fees (2.24%): LKR {roundTripFees.toLocaleString('en-LK', { maximumFractionDigits: 0 })}
                             </span>
                           )}
 
                           {netAfterFees !== null && (
                             <span
-                              className={`font-bold px-2 py-0.5 rounded-md tabular-nums ${
+                              className={`font-bold px-2 py-0.5 rounded-md font-mono tabular-nums ${
                                 netAfterFees >= 0
                                   ? 'bg-emerald-100 text-emerald-900'
-                                  : 'bg-rose-100 text-rose-800'
+                                  : 'bg-rose-50 text-rose-800'
                               }`}
                             >
                               {netAfterFees >= 0
-                                ? `Net Gain: +LKR ${netAfterFees.toLocaleString('en-LK', { maximumFractionDigits: 0 })}`
+                                ? `Net Profit: +LKR ${netAfterFees.toLocaleString('en-LK', { maximumFractionDigits: 0 })}`
                                 : `Fee Loss: -LKR ${Math.abs(netAfterFees).toLocaleString('en-LK', { maximumFractionDigits: 0 })}`}
                             </span>
                           )}
@@ -902,90 +943,93 @@ export const CSENewsTab: React.FC<CSENewsTabProps> = ({
                       )}
                     </div>
 
-                    <div className="flex flex-wrap items-center gap-2.5 shrink-0">
-                      {/* 14D RSI & SMA-50 Technical Box */}
-                      <div className="text-right bg-slate-50 px-3 py-1.5 rounded-xl border border-slate-200 flex flex-col items-end">
-                        <span className="text-3xs text-slate-400">14D RSI / SMA-50</span>
-                        <div className="flex items-center space-x-1.5 my-0.5">
-                          <span
-                            className={`font-mono font-bold tabular-nums px-1.5 py-0.2 rounded text-2xs ${
-                              typeof item.resolvedRsi14 === 'number'
-                                ? item.resolvedRsi14 >= 70
-                                  ? 'bg-rose-100 text-rose-800'
-                                  : item.resolvedRsi14 <= 30
-                                  ? 'bg-sky-100 text-sky-800'
-                                  : 'bg-slate-200/80 text-slate-800'
-                                : 'text-slate-400'
-                            }`}
-                          >
-                            {typeof item.resolvedRsi14 === 'number'
-                              ? `RSI ${item.resolvedRsi14.toFixed(1)}`
-                              : 'RSI —'}
+                    {/* Right Side: Clean Structured Metric Boxes */}
+                    <div className="flex flex-wrap items-center justify-start xl:justify-end gap-2.5 shrink-0">
+                      {item.expectedTotalPayout !== null && (
+                        <div className="bg-teal-50 border border-teal-200 rounded-xl px-3.5 py-2 text-right">
+                          <span className="text-3xs font-semibold text-teal-700 uppercase block">
+                            Eligible Payout
+                          </span>
+                          <span className="text-xs font-bold text-teal-900 tabular-nums">
+                            LKR {item.expectedTotalPayout.toLocaleString('en-LK', { minimumFractionDigits: 2 })}
                           </span>
                         </div>
-                        <span className="text-[10px] font-mono text-slate-500">
-                          {typeof item.resolvedSma50 === 'number'
-                            ? `SMA50: Rs.${item.resolvedSma50.toFixed(1)}`
-                            : 'SMA50: —'}
+                      )}
+
+                      {/* Box 1: 14D RSI / SMA-50 */}
+                      <div className="bg-slate-50 border border-slate-200/90 rounded-xl px-3.5 py-2 text-right min-w-[105px]">
+                        <span className="text-3xs font-medium text-slate-400 block">
+                          14D RSI / SMA-50
+                        </span>
+                        <span
+                          className={`text-xs font-bold font-mono tabular-nums block ${
+                            typeof item.resolvedRsi14 === 'number' && item.resolvedRsi14 >= 70
+                              ? 'text-rose-700'
+                              : typeof item.resolvedRsi14 === 'number' && item.resolvedRsi14 <= 30
+                              ? 'text-sky-700'
+                              : 'text-slate-800'
+                          }`}
+                        >
+                          {typeof item.resolvedRsi14 === 'number' ? `RSI ${item.resolvedRsi14.toFixed(1)}` : 'RSI —'}
+                        </span>
+                        <span className="text-3xs text-slate-400 font-mono block">
+                          {typeof item.resolvedSma50 === 'number' ? `SMA50: Rs.${item.resolvedSma50.toFixed(1)}` : 'SMA50: —'}
                         </span>
                       </div>
 
-                      <div className="text-right bg-slate-50 px-3 py-1.5 rounded-xl border border-slate-200 flex flex-col items-end">
-                        <span className="text-3xs text-slate-400">Share Price</span>
-                        <span className="font-bold text-slate-900 tabular-nums my-0.5">
+                      {/* Box 2: Share Price */}
+                      <div className="bg-slate-50 border border-slate-200/90 rounded-xl px-3.5 py-2 text-right min-w-[95px]">
+                        <span className="text-3xs font-medium text-slate-400 block">
+                          Share Price
+                        </span>
+                        <span className="text-xs font-bold text-slate-900 font-mono tabular-nums block">
                           {item.resolvedPrice !== null ? `Rs. ${item.resolvedPrice.toFixed(2)}` : '—'}
                         </span>
                         {item.priceSource === 'CSE_LIVE' && (
-                          <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-emerald-100 text-emerald-800 border border-emerald-200">
+                          <span className="inline-block text-3xs font-semibold text-emerald-700 bg-emerald-50 px-1.5 rounded border border-emerald-200 mt-0.5">
                             ● CSE Live
-                          </span>
-                        )}
-                        {item.priceSource === 'PORTFOLIO' && (
-                          <span className="text-[9px] font-semibold px-1.5 py-0.2 rounded bg-sky-100 text-sky-800 border border-sky-200">
-                            Portfolio
-                          </span>
-                        )}
-                        {item.priceSource === 'MANUAL' && (
-                          <span className="text-[9px] font-semibold px-1.5 py-0.2 rounded bg-amber-100 text-amber-800 border border-amber-200">
-                            Manual Entry
                           </span>
                         )}
                       </div>
 
-                      {item.dividendAmount && (
-                        <div className="text-right bg-emerald-50/70 px-3 py-1.5 rounded-xl border border-emerald-200">
-                          <span className="text-3xs text-emerald-700 block">Dividend (Yield)</span>
-                          <span className="font-bold text-emerald-900 tabular-nums">
-                            Rs. {item.dividendAmount.toFixed(2)}
-                            {divYield !== null && ` (${divYield.toFixed(1)}%)`}
-                          </span>
-                        </div>
-                      )}
+                      {/* Box 3: Dividend (Yield) */}
+                      <div className="bg-emerald-50/70 border border-emerald-200 rounded-xl px-3.5 py-2 text-right min-w-[115px]">
+                        <span className="text-3xs font-medium text-emerald-700 block">
+                          Dividend (Yield)
+                        </span>
+                        <span className="text-xs font-bold text-emerald-900 font-mono tabular-nums block">
+                          {item.dividendAmount !== null && item.dividendAmount !== undefined
+                            ? `Rs. ${item.dividendAmount.toFixed(2)}${divYield !== null ? ` (${divYield.toFixed(1)}%)` : ''}`
+                            : '—'}
+                        </span>
+                      </div>
 
-                      {item.xdDate && (
-                        <div className="text-right bg-sky-50 px-3 py-1.5 rounded-xl border border-sky-200">
-                          <span className="text-3xs text-sky-700 font-semibold flex items-center justify-end space-x-1">
-                            <Calendar className="w-3 h-3" />
-                            <span>XD Date</span>
-                          </span>
-                          <span className="font-bold text-sky-950 font-mono">{item.xdDate}</span>
-                        </div>
-                      )}
+                      {/* Box 4: XD Date */}
+                      <div className="bg-slate-50 border border-slate-200/90 rounded-xl px-3.5 py-2 text-center min-w-[100px]">
+                        <span className="text-3xs font-medium text-slate-500 inline-flex items-center space-x-1">
+                          <Calendar className="w-3 h-3 text-slate-400" />
+                          <span>XD Date</span>
+                        </span>
+                        <span className="text-xs font-bold text-slate-900 font-mono block mt-0.5">
+                          {item.xdDate || '—'}
+                        </span>
+                      </div>
 
-                      <div className="text-right bg-indigo-50/70 px-3 py-1.5 rounded-xl border border-indigo-200">
-                        <span className="text-3xs text-indigo-700 font-semibold flex items-center justify-end space-x-1">
-                          <Banknote className="w-3 h-3" />
+                      {/* Box 5: Payment Date */}
+                      <div className="bg-indigo-50/70 border border-indigo-200 rounded-xl px-3.5 py-2 text-center min-w-[105px]">
+                        <span className="text-3xs font-medium text-indigo-700 inline-flex items-center space-x-1">
+                          <Banknote className="w-3 h-3 text-indigo-500" />
                           <span>Payment Date</span>
                         </span>
-                        <span className="font-bold text-indigo-950 font-mono">
-                          {item.paymentDate || 'TBA'}
+                        <span className="text-xs font-bold text-indigo-950 font-mono block mt-0.5">
+                          {item.paymentDate || '—'}
                         </span>
                       </div>
 
                       {onDeleteDividendItem && (
                         <button
                           onClick={() => onDeleteDividendItem(item.id)}
-                          title="Remove from active radar"
+                          title="Delete Entry"
                           className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition-colors"
                         >
                           <Trash2 className="w-4 h-4" />
@@ -999,38 +1043,37 @@ export const CSENewsTab: React.FC<CSENewsTabProps> = ({
           )}
         </div>
       ) : (
-        /* TAB 2: BROKER-STYLE DIVIDEND SEASONALITY BOOK (Jan - Dec Logbook) */
+        /* TAB 2: PERMANENT MONTH-BY-MONTH DIVIDEND SEASONALITY BOOK */
         <div className="bg-white rounded-2xl border border-slate-200/90 shadow-xs overflow-hidden">
-          <div className="p-4 sm:p-5 border-b border-slate-200 bg-slate-50/50 space-y-3">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div className="p-4 sm:p-5 border-b border-slate-200 bg-indigo-50/40">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
               <div>
-                <h3 className="text-sm font-semibold text-slate-900">
-                  Broker Dividend Seasonality Book (By XD Month & Year)
+                <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wide">
+                  Month-by-Month CSE Dividend Seasonality Archive (2026+)
                 </h3>
-                <p className="text-2xs text-slate-500">
-                  Click any month below to see which CSE stocks go XD in that month so you can accumulate them early next year.
+                <p className="text-2xs text-slate-500 mt-0.5">
+                  Permanent reference book showing which months companies historically declare dividends — plan your entries 2–3 weeks before XD!
                 </p>
               </div>
-              <span className="text-2xs font-semibold px-3 py-1 rounded-full bg-indigo-50 text-indigo-800 border border-indigo-200">
-                {dividendBook.length} Recorded Payouts
+              <span className="text-2xs font-semibold text-indigo-800 bg-indigo-100 px-2.5 py-1 rounded-lg">
+                {filteredBook.length} Recorded Payouts
               </span>
             </div>
 
-            {/* 12-Month Selector Pills */}
-            <div className="flex flex-wrap items-center gap-1.5">
+            <div className="flex flex-wrap gap-1.5">
               <button
                 type="button"
                 onClick={() => setSelectedMonth('ALL')}
-                className={`px-3 py-1 text-2xs font-semibold rounded-lg transition-colors ${
+                className={`px-2.5 py-1 text-2xs font-semibold rounded-lg transition-colors ${
                   selectedMonth === 'ALL'
-                    ? 'bg-slate-900 text-white shadow-2xs'
+                    ? 'bg-indigo-600 text-white shadow-2xs'
                     : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
                 }`}
               >
                 All Months ({dividendBook.length})
               </button>
               {MONTHS.map((mName, idx) => {
-                const count = dividendBook.filter((b) => b.monthIndex === idx).length;
+                const count = dividendBook.filter((e) => e.monthIndex === idx).length;
                 return (
                   <button
                     key={mName}
@@ -1040,8 +1083,8 @@ export const CSENewsTab: React.FC<CSENewsTabProps> = ({
                       selectedMonth === idx
                         ? 'bg-indigo-600 text-white shadow-2xs'
                         : count > 0
-                        ? 'bg-indigo-50/70 text-indigo-900 border border-indigo-200 hover:bg-indigo-100'
-                        : 'bg-white text-slate-400 border border-slate-200 hover:text-slate-700'
+                        ? 'bg-white text-slate-800 hover:bg-indigo-50 border border-indigo-200'
+                        : 'bg-slate-50 text-slate-400 border border-slate-200/70'
                     }`}
                   >
                     {mName.slice(0, 3)} {count > 0 ? `(${count})` : ''}
@@ -1053,78 +1096,63 @@ export const CSENewsTab: React.FC<CSENewsTabProps> = ({
 
           {filteredBook.length === 0 ? (
             <div className="p-12 text-center text-xs text-slate-500">
-              No dividend entries recorded for this month yet. Every 2026+ dividend synced or added above is automatically logged here!
+              No dividend records stored for this month yet. Click "Sync All CSE Dividends" to build your 2026 seasonality archive!
             </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
-                  <tr className="border-b border-slate-200 bg-slate-50/60 text-slate-500 font-semibold uppercase tracking-wider text-2xs">
-                    <th className="py-3 px-4">XD Month</th>
-                    <th className="py-3 px-4">Year</th>
-                    <th className="py-3 px-4">Symbol / Company</th>
+                  <tr className="border-b border-slate-200 bg-slate-50/70 text-slate-500 font-semibold uppercase tracking-wider text-2xs">
+                    <th className="py-3 px-4">Month / Year</th>
+                    <th className="py-3 px-4">Symbol &amp; Company</th>
                     <th className="py-3 px-4 text-right">Dividend / Share</th>
-                    <th className="py-3 px-4">Exact XD Date</th>
+                    <th className="py-3 px-4 text-right">Price at XD</th>
+                    <th className="py-3 px-4 text-right">Est. Yield</th>
+                    <th className="py-3 px-4">XD Date</th>
                     <th className="py-3 px-4">Payment Date</th>
-                    <th className="py-3 px-4 text-right">Ref. Price</th>
                     <th className="py-3 px-4 text-right">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {filteredBook.map((entry) => {
-                    const isOwned = ownedMap.has(entry.symbol) || ownedMap.has(entry.symbol.split('.')[0]);
-                    const tradingViewUrl = `https://www.tradingview.com/chart/?symbol=CSELK%3A${encodeURIComponent(entry.symbol)}`;
+                    const estYield =
+                      entry.dividendAmount && entry.recordedPrice && entry.recordedPrice > 0
+                        ? (entry.dividendAmount / entry.recordedPrice) * 100
+                        : null;
+
                     return (
                       <tr key={entry.key} className="hover:bg-slate-50/80 transition-colors">
-                        <td className="py-3.5 px-4 whitespace-nowrap">
-                          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-2xs font-bold bg-indigo-50 text-indigo-800 border border-indigo-200">
-                            {entry.monthName}
+                        <td className="py-3 px-4 whitespace-nowrap">
+                          <span className="inline-flex items-center px-2.5 py-0.5 rounded-md text-2xs font-bold bg-indigo-50 text-indigo-800 border border-indigo-200">
+                            {entry.monthName} {entry.year}
                           </span>
                         </td>
-                        <td className="py-3.5 px-4 font-mono font-semibold text-slate-700">
-                          {entry.year}
-                        </td>
-                        <td className="py-3.5 px-4">
-                          <div className="flex items-center space-x-2">
-                            <span className="font-bold text-slate-900">{entry.symbol}</span>
-                            <a
-                              href={tradingViewUrl}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              title={`Open ${entry.symbol} Live Chart on TradingView`}
-                              className="inline-flex items-center justify-center p-0.5 rounded text-sky-600 bg-sky-50 hover:bg-sky-100 border border-sky-200/80"
-                            >
-                              <LineChart className="w-3 h-3" />
-                            </a>
-                            {isOwned && (
-                              <span className="text-3xs px-1.5 py-0.2 rounded bg-teal-50 text-teal-800 border border-teal-200 font-semibold">
-                                Owned
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-2xs text-slate-400 truncate max-w-[180px]">
+                        <td className="py-3 px-4">
+                          <div className="font-bold text-slate-900">{entry.symbol}</div>
+                          <div className="text-2xs text-slate-400 truncate max-w-[200px]">
                             {entry.companyName}
                           </div>
                         </td>
-                        <td className="py-3.5 px-4 text-right font-bold text-emerald-800 tabular-nums whitespace-nowrap">
-                          {entry.dividendAmount !== null
-                            ? `Rs. ${entry.dividendAmount.toFixed(2)}`
-                            : 'Declared'}
+                        <td className="py-3 px-4 text-right font-bold text-emerald-800 tabular-nums whitespace-nowrap">
+                          {entry.dividendAmount !== null ? `Rs. ${entry.dividendAmount.toFixed(2)}` : '—'}
                         </td>
-                        <td className="py-3.5 px-4 font-mono text-slate-700 whitespace-nowrap">
-                          {entry.xdDate}
-                        </td>
-                        <td className="py-3.5 px-4 font-mono text-slate-500 whitespace-nowrap">
-                          {entry.paymentDate || 'TBA'}
-                        </td>
-                        <td className="py-3.5 px-4 text-right font-mono text-slate-600 tabular-nums whitespace-nowrap">
+                        <td className="py-3 px-4 text-right font-mono text-slate-600 tabular-nums whitespace-nowrap">
                           {entry.recordedPrice !== null ? `Rs. ${entry.recordedPrice.toFixed(2)}` : '—'}
                         </td>
-                        <td className="py-3.5 px-4 text-right">
+                        <td className="py-3 px-4 text-right font-semibold text-sky-700 tabular-nums whitespace-nowrap">
+                          {estYield !== null ? `${estYield.toFixed(2)}%` : '—'}
+                        </td>
+                        <td className="py-3 px-4 font-mono text-slate-700 whitespace-nowrap">
+                          {entry.xdDate}
+                        </td>
+                        <td className="py-3 px-4 font-mono text-slate-500 whitespace-nowrap">
+                          {entry.paymentDate || '—'}
+                        </td>
+                        <td className="py-3 px-4 text-right whitespace-nowrap">
                           <button
                             type="button"
                             onClick={() => handleDeleteBookEntry(entry.key)}
-                            title="Delete from Seasonality Book"
+                            title="Remove from Seasonality Book"
                             className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
