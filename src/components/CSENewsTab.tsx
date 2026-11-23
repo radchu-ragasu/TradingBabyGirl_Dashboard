@@ -93,6 +93,16 @@ function isPaymentCompleted(item: CSENewsItem): boolean {
   return false;
 }
 
+
+function hasXdPassed(xdDateStr?: string | null): boolean {
+  if (!xdDateStr) return false;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const xd = new Date(`${xdDateStr.slice(0, 10)}T00:00:00`);
+  return !isNaN(xd.getTime()) && today.getTime() > xd.getTime();
+}
+
+
 /**
  * Calculate exact eligible shares held BEFORE the Ex-Dividend (XD) Date.
  * Under CSE rules, shares bought ON or AFTER the XD Date do NOT receive the dividend.
@@ -314,9 +324,22 @@ export const CSENewsTab: React.FC<CSENewsTabProps> = ({
     }
   }, [newsItems, onDeleteDividendItem]);
 
-  const activeRadarItems = newsItems.filter(
-    (item) => isValidDividendItem(item) && !isPaymentCompleted(item)
-  );
+  const activeRadarItems = newsItems.filter((item) => {
+    if (!isValidDividendItem(item) || isPaymentCompleted(item)) return false;
+
+    const matched =
+      ownedMap.get(item.symbol.toUpperCase()) ||
+      ownedMap.get(item.symbol.toUpperCase().split('.')[0]);
+    const isOwned = Boolean(matched) || Boolean(item.inPortfolio);
+
+    // Not owned -> hide immediately once XD Date passes
+    if (!isOwned && hasXdPassed(item.xdDate)) {
+      return false;
+    }
+
+    // Owned -> keep showing until Payment Date passes (already handled by isPaymentCompleted above)
+    return true;
+  });
 
   const syncLivePricesAndTechnicals = async () => {
     if (activeRadarItems.length === 0) return;
