@@ -11,7 +11,8 @@ import {
   Eye,
   Search,
   Sparkles,
-  Check
+  Check,
+  Target
 } from 'lucide-react';
 import { fetchLiveCsePrice } from '../services/csePriceService';
 
@@ -40,9 +41,6 @@ function saveWatchlist(items: WatchlistItem[]) {
   }
 }
 
-/**
- * Compute AI-suggested technical entry price using Live Price, 14D RSI, and SMA-50
- */
 function computeAiSuggestedBuyPrice(item: WatchlistItem): {
   suggestedPrice: number | null;
   discountPct: number | null;
@@ -56,7 +54,6 @@ function computeAiSuggestedBuyPrice(item: WatchlistItem): {
     return { suggestedPrice: null, discountPct: null, rationale: 'Sync price first' };
   }
 
-  // Case 1: Already oversold (RSI <= 30) -> Suggest waiting for >30 bounce confirmation slightly above current floor
   if (rsi !== null && rsi <= 30) {
     const bounceTrigger = Number((price * 1.015).toFixed(2));
     return {
@@ -66,17 +63,12 @@ function computeAiSuggestedBuyPrice(item: WatchlistItem): {
     };
   }
 
-  // Case 2: Both RSI and SMA-50 available -> Blend RSI-32 pullback estimate & SMA-50 support
   if (rsi !== null && sma !== null) {
-    // Estimate % pullback needed for RSI to cool toward ~32
     const rsiExcess = Math.max(0, rsi - 32);
     const rsiPullbackFactor = Math.min(0.22, rsiExcess * 0.0032);
     const rsiTarget = price * (1 - rsiPullbackFactor);
-
-    // Support zone below SMA-50 (4% under SMA-50 where oversold bounces typically form)
     const smaSupport = sma * 0.96;
 
-    // Pick the safer (lower) realistic entry floor, capped within 3% to 20% below live price
     const rawTarget = Math.min(rsiTarget, smaSupport);
     const minFloor = price * 0.80;
     const maxCeiling = price * 0.97;
@@ -90,7 +82,6 @@ function computeAiSuggestedBuyPrice(item: WatchlistItem): {
     };
   }
 
-  // Case 3: Only SMA-50 available
   if (sma !== null) {
     const rawTarget = sma * 0.96;
     const finalTarget = Number(Math.min(price * 0.97, rawTarget).toFixed(2));
@@ -102,7 +93,6 @@ function computeAiSuggestedBuyPrice(item: WatchlistItem): {
     };
   }
 
-  // Case 4: Fallback 6% pullback from current price
   const fallbackTarget = Number((price * 0.94).toFixed(2));
   return {
     suggestedPrice: fallbackTarget,
@@ -120,6 +110,7 @@ function getWatchlistBuySignal(item: WatchlistItem) {
   if (!hasPrice && !hasRsi) {
     return {
       type: 'PENDING',
+      priority: 4,
       label: 'AWAITING SYNC',
       badgeClass: 'bg-slate-100 text-slate-600 border border-slate-200',
       subtext: 'Click Sync to check RSI & Price',
@@ -128,39 +119,42 @@ function getWatchlistBuySignal(item: WatchlistItem) {
 
   const currentRsi = hasRsi ? (item.rsi14 as number) : null;
   const prevRsi = hasPrevRsi ? (item.prevRsi14 as number) : null;
+  const isTargetReached =
+    hasPrice &&
+    typeof item.targetPrice === 'number' &&
+    item.targetPrice > 0 &&
+    (item.marketPrice as number) <= item.targetPrice;
 
-  // 1. RSI crossed back above 30 from <= 30 (Confirmed Buy Zone)
+  // 1. Confirmed RSI >30 Reversal Bounce (Highest Priority)
   if (currentRsi !== null && currentRsi > 30 && currentRsi <= 42 && prevRsi !== null && prevRsi <= 30) {
     return {
       type: 'BUY_ZONE',
+      priority: 1,
       label: 'BUY ZONE • RSI >30 BOUNCE',
       badgeClass: 'bg-sky-600 text-white border border-sky-700 font-bold shadow-2xs',
       subtext: `RSI ${prevRsi.toFixed(1)} → ${currentRsi.toFixed(1)} (Reversal Confirmed)`,
     };
   }
 
-  // 2. Currently Oversold (<= 30) -> Wait for >30 bounce
-  if (currentRsi !== null && currentRsi <= 30) {
+  // 2. Target Price Hit!
+  if (isTargetReached) {
     return {
-      type: 'WAIT_BOUNCE',
-      label: 'OVERSOLD • WAIT FOR >30 BOUNCE',
-      badgeClass: 'bg-amber-50 text-amber-900 border border-amber-300 font-semibold',
-      subtext: `RSI ${currentRsi.toFixed(1)} (<=30) • Do not catch falling knife`,
+      type: 'TARGET_HIT',
+      priority: 1,
+      label: 'TARGET HIT • READY TO BUY',
+      badgeClass: 'bg-emerald-600 text-white border border-emerald-700 font-bold shadow-2xs',
+      subtext: `Live Rs.${item.marketPrice?.toFixed(2)} <= Target Rs.${item.targetPrice?.toFixed(2)}`,
     };
   }
 
-  // 3. Target Price Reached
-  if (
-    hasPrice &&
-    typeof item.targetPrice === 'number' &&
-    item.targetPrice > 0 &&
-    (item.marketPrice as number) <= item.targetPrice
-  ) {
+  // 3. Currently Oversold (<= 30) -> Wait for >30 bounce
+  if (currentRsi !== null && currentRsi <= 30) {
     return {
-      type: 'TARGET_HIT',
-      label: 'TARGET PRICE HIT • CHECK RSI',
-      badgeClass: 'bg-emerald-50 text-emerald-900 border border-emerald-300 font-bold',
-      subtext: `Price Rs.${item.marketPrice?.toFixed(2)} <= Target Rs.${item.targetPrice.toFixed(2)}`,
+      type: 'WAIT_BOUNCE',
+      priority: 2,
+      label: 'OVERSOLD • WAIT FOR >30 BOUNCE',
+      badgeClass: 'bg-amber-50 text-amber-900 border border-amber-300 font-semibold',
+      subtext: `RSI ${currentRsi.toFixed(1)} (<=30) • Do not catch falling knife`,
     };
   }
 
@@ -168,6 +162,7 @@ function getWatchlistBuySignal(item: WatchlistItem) {
   if (currentRsi !== null && currentRsi >= 70) {
     return {
       type: 'OVERBOUGHT',
+      priority: 5,
       label: 'OVERBOUGHT • AVOID ENTRY',
       badgeClass: 'bg-rose-50 text-rose-800 border border-rose-200',
       subtext: `RSI ${currentRsi.toFixed(1)} (>=70) • Too expensive right now`,
@@ -176,6 +171,7 @@ function getWatchlistBuySignal(item: WatchlistItem) {
 
   return {
     type: 'NEUTRAL',
+    priority: 3,
     label: 'WATCHING • NEUTRAL',
     badgeClass: 'bg-slate-50 text-slate-700 border border-slate-200',
     subtext: currentRsi !== null
@@ -317,15 +313,19 @@ export const WatchlistTab: React.FC<WatchlistTabProps> = ({ ownedSymbols }) => {
     setItems((prev) => prev.filter((item) => item.id !== id));
   };
 
-  const enrichedItems = items.map((item) => ({
-    item,
-    signal: getWatchlistBuySignal(item),
-    aiSuggestion: computeAiSuggestedBuyPrice(item),
-  }));
+  // Enrich & automatically sort so Buy Zone / Target Hit stocks always appear at the top!
+  const enrichedItems = items
+    .map((item) => ({
+      item,
+      signal: getWatchlistBuySignal(item),
+      aiSuggestion: computeAiSuggestedBuyPrice(item),
+    }))
+    .sort((a, b) => a.signal.priority - b.signal.priority);
 
-  const buyZoneCount = enrichedItems.filter(
+  const actionableStocks = enrichedItems.filter(
     (x) => x.signal.type === 'BUY_ZONE' || x.signal.type === 'TARGET_HIT'
-  ).length;
+  );
+  const buyZoneCount = actionableStocks.length;
   const oversoldCount = enrichedItems.filter((x) => x.signal.type === 'WAIT_BOUNCE').length;
 
   const filteredItems = enrichedItems.filter(({ item, signal }) => {
@@ -345,20 +345,53 @@ export const WatchlistTab: React.FC<WatchlistTabProps> = ({ ownedSymbols }) => {
 
   return (
     <div className="space-y-6">
+      {/* Top Alert Banner when any stock hits Target Price or RSI >30 Buy Zone */}
+      {actionableStocks.length > 0 && (
+        <div className="p-4 bg-emerald-50 border-2 border-emerald-400 rounded-2xl shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start space-x-3">
+            <div className="p-2 bg-emerald-600 text-white rounded-xl shrink-0">
+              <Target className="w-4 h-4" />
+            </div>
+            <div>
+              <h3 className="text-xs font-bold text-emerald-950 uppercase tracking-wide">
+                Buy Alert: {actionableStocks.length} Stock{actionableStocks.length > 1 ? 's' : ''} Reached Entry Zone!
+              </h3>
+              <p className="text-xs text-emerald-900 mt-0.5 font-medium">
+                {actionableStocks
+                  .map(
+                    ({ item }) =>
+                      `${item.symbol} (Live Rs.${item.marketPrice?.toFixed(2)}${
+                        item.targetPrice ? ` / Target Rs.${item.targetPrice.toFixed(2)}` : ''
+                      })`
+                  )
+                  .join('  •  ')}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setFilterMode(filterMode === 'BUY_ZONE' ? 'ALL' : 'BUY_ZONE')}
+            className="px-3.5 py-1.5 text-xs font-bold bg-emerald-700 text-white rounded-xl hover:bg-emerald-800 transition-colors shrink-0"
+          >
+            {filterMode === 'BUY_ZONE' ? 'Show All' : 'Filter Alerts'}
+          </button>
+        </div>
+      )}
+
       {/* Header + Add Watchlist Stock Form */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-xs p-5 sm:p-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-100">
           <div>
             <div className="flex items-center space-x-2">
               <h2 className="text-base font-semibold text-slate-900 tracking-tight">
-                CSE Watchlist & AI Buy Zone Radar
+                CSE Watchlist &amp; AI Buy Zone Radar
               </h2>
               <span className="text-2xs px-2.5 py-0.5 rounded-full bg-sky-50 text-sky-800 font-semibold border border-sky-200">
-                RSI &gt;30 Reversal + AI Entry Price
+                Auto-Highlighted Alerts
               </span>
             </div>
             <p className="text-xs text-slate-500 mt-1">
-              AI calculates ideal pullback entry prices from <span className="font-semibold text-slate-700">14D RSI &amp; SMA-50</span> and alerts <span className="font-semibold text-sky-800">BUY ZONE</span> on &gt;30 bounce.
+              Stocks hitting your <span className="font-semibold text-emerald-800">Target Price</span> or <span className="font-semibold text-sky-800">RSI &gt;30 Bounce</span> automatically jump to the top and highlight in green/blue.
             </p>
           </div>
 
@@ -526,8 +559,17 @@ export const WatchlistTab: React.FC<WatchlistTabProps> = ({ ownedSymbols }) => {
                     aiSuggestion.suggestedPrice !== null &&
                     Math.abs(item.targetPrice - aiSuggestion.suggestedPrice) < 0.01;
 
+                  const isTargetHitRow = signal.type === 'TARGET_HIT';
+                  const isBuyZoneRow = signal.type === 'BUY_ZONE';
+
+                  const rowHighlightClass = isTargetHitRow
+                    ? 'bg-emerald-50/90 hover:bg-emerald-100/80 border-l-4 border-l-emerald-600'
+                    : isBuyZoneRow
+                    ? 'bg-sky-50/90 hover:bg-sky-100/80 border-l-4 border-l-sky-600'
+                    : 'hover:bg-slate-50/80';
+
                   return (
-                    <tr key={item.id} className="hover:bg-slate-50/80 transition-colors">
+                    <tr key={item.id} className={`transition-colors ${rowHighlightClass}`}>
                       <td className="py-3.5 px-4">
                         <div className="flex items-center space-x-1.5">
                           <span className="font-bold text-slate-900">{item.symbol}</span>
@@ -557,7 +599,6 @@ export const WatchlistTab: React.FC<WatchlistTabProps> = ({ ownedSymbols }) => {
                         {typeof item.marketPrice === 'number' ? `Rs. ${item.marketPrice.toFixed(2)}` : '—'}
                       </td>
 
-                      {/* AI Suggested Buy Price Column */}
                       <td className="py-3.5 px-4 text-right whitespace-nowrap">
                         {aiSuggestion.suggestedPrice !== null ? (
                           <div className="inline-flex flex-col items-end">
@@ -569,7 +610,7 @@ export const WatchlistTab: React.FC<WatchlistTabProps> = ({ ownedSymbols }) => {
                                 <button
                                   type="button"
                                   onClick={() => handleApplyAiTarget(item.id, aiSuggestion.suggestedPrice!)}
-                                  title="Use AI suggested price as your Target Price"
+                                  title="Lock AI suggested price as your Target Price"
                                   className="px-1.5 py-0.5 text-3xs font-semibold bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 rounded-md transition-colors"
                                 >
                                   Apply
@@ -590,14 +631,28 @@ export const WatchlistTab: React.FC<WatchlistTabProps> = ({ ownedSymbols }) => {
                         )}
                       </td>
 
-                      <td className="py-3.5 px-4 text-right font-mono text-slate-700 font-semibold tabular-nums">
-                        {typeof item.targetPrice === 'number' ? `Rs. ${item.targetPrice.toFixed(2)}` : '—'}
+                      <td className="py-3.5 px-4 text-right font-mono tabular-nums">
+                        {typeof item.targetPrice === 'number' ? (
+                          <span
+                            className={`px-2 py-0.5 rounded-md font-bold ${
+                              isTargetHitRow
+                                ? 'bg-emerald-600 text-white'
+                                : 'text-slate-800 bg-slate-100'
+                            }`}
+                          >
+                            Rs. {item.targetPrice.toFixed(2)}
+                          </span>
+                        ) : (
+                          <span className="text-slate-400">—</span>
+                        )}
                       </td>
 
                       <td className="py-3.5 px-4 whitespace-nowrap">
                         <div className="inline-flex flex-col items-start">
                           <span className={`inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-lg text-2xs font-semibold ${signal.badgeClass}`}>
-                            {signal.type === 'BUY_ZONE' && <TrendingDown className="w-3 h-3 text-white shrink-0" />}
+                            {(signal.type === 'BUY_ZONE' || signal.type === 'TARGET_HIT') && (
+                              <TrendingDown className="w-3 h-3 text-white shrink-0" />
+                            )}
                             {signal.type === 'WAIT_BOUNCE' && <AlertTriangle className="w-3 h-3 text-amber-700 shrink-0" />}
                             {signal.type === 'PENDING' && <Clock className="w-3 h-3 text-slate-400 shrink-0" />}
                             {signal.type === 'NEUTRAL' && <Eye className="w-3 h-3 text-slate-500 shrink-0" />}
